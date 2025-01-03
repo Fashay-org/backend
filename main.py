@@ -258,6 +258,9 @@ async def read_login(request: Request):
 @app.get("/")
 async def read_root(request: Request):
     return templates.TemplateResponse("app.html", {"request": request})
+@app.get("/profile")
+async def profile_page(request: Request):
+    return templates.TemplateResponse("profile.html", {"request": request})
 # Auth Endpoints
 @app.post("/signup", response_model=StandardResponse)
 async def signup(data: SignupRequest):
