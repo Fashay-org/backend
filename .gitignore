@@ -3,3 +3,4 @@ myenv
 model/
 # Add this to .gitignore if not already there
 Final_embeddings/*.pkl
+Final_embeddings/*.npz

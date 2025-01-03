@@ -522,7 +522,7 @@ async def handle_chat(data: ChatRequest):
         )
     
     except Exception as e:
-        logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
+        # logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
 class ImageUploadRequest(BaseModel):
     email: str
