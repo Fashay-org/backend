@@ -206,6 +206,8 @@ class FashionAssistant:
                     "similarity_score": product["similarity_score"],
                     "image_urls": product.get("image_urls", []),
                     "url": product.get("url", ""),  # Product URL
+                    "price": product.get("price", ""),  # Product price
+                    "brand": product.get("brand", ""),  # Product brand
                     "suggestion": category_suggestions.get(product["category"], ""),
                     "gender": product.get("gender", "")
                 }
@@ -218,7 +220,7 @@ class FashionAssistant:
                 
                 formatted_response["recommendations"]["products"].append(formatted_product)
             
-            print(formatted_response, "formatted_response printing")
+            # print(formatted_response, "formatted_response printing")
             return {
                 "messages": state["messages"],
                 "response": json.dumps(formatted_response)
@@ -279,6 +281,20 @@ class FashionAssistant:
     async def check_recommendation_need(self, state: State) -> Dict[str, Any]:
         """Determine if external product recommendations are needed"""
         try:
+            # First check if wardrobe is empty
+            # print("wardrobe data printing", state["wardrobe_data"])
+            if not state["wardrobe_data"]:
+                return {
+                    **state,
+                    "needs_recommendations": True,
+                    "shopping_analysis": {
+                        "needs_shopping": True,
+                        "confidence": 1.0,
+                        "reasoning": "No items in wardrobe, recommendations needed",
+                        "categories": []
+                    }
+                }
+
             system_prompt = """You are a shopping intent analyzer. Determine if the user's query indicates 
             interest in purchasing or shopping for new items. Consider both explicit mentions and implicit intent.
             Return ONLY a JSON with this exact structure:
@@ -287,7 +303,8 @@ class FashionAssistant:
                 "confidence": float,
                 "reasoning": "brief explanation",
                 "categories": ["category1", "category2"]
-            }"""
+            }
+            """
 
             wardrobe_info = "\n".join([f"- {item['caption']}" for item in state["wardrobe_data"]])
             user_context = f"""User Query: {state["user_query"]}
@@ -295,7 +312,8 @@ class FashionAssistant:
             Their Current Wardrobe Items:
             {wardrobe_info}
             
-            Analyze if they need new items or can be styled with existing wardrobe."""
+            Analyze if they need new items or can be styled with existing wardrobe.
+            If the wardrobe lacks essential items to create a complete outfit, indicate that shopping is needed."""
 
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -309,13 +327,20 @@ class FashionAssistant:
 
             analysis = json.loads(response.choices[0].message.content)
             needs_recommendations = analysis.get("needs_shopping", False)
-            # print(analysis, needs_recommendations, "analysis printing")
+
+            # If wardrobe response exists but has no items referenced, also trigger recommendations
+            if state.get("wardrobe_response") and not state["wardrobe_response"].get("value"):
+                needs_recommendations = True
+                analysis["needs_shopping"] = True
+                analysis["reasoning"] += " (No suitable items found in wardrobe)"
+            
+            print("shopping analysis printing", needs_recommendations, analysis)
             return {
                 **state,
                 "needs_recommendations": needs_recommendations,
                 "shopping_analysis": analysis
             }
-            
+                
         except Exception as e:
             print(f"Error in shopping intent analysis: {str(e)}")
             return {
@@ -363,6 +388,7 @@ class FashionAssistant:
 
                             - The text field should contain your complete styling advice
                             - The value array MUST contain the token_names of items you referenced
+                            - Do not include wardrobe item token names in the styling advice
                             - Include ALL wardrobe items you mentioned in your advice in the value array
                             - Do not add any text outside the JSON structure
                             """
@@ -599,7 +625,7 @@ async def chat_with_stylist(
 
 if __name__ == "__main__":
     async def main():
-        query = "I need a new outfit for a summer wedding, give something from within the wardrobe."
+        query = "I need a new outfit for a summer wedding, give something from outside the wardrobe."
         unique_id = "9ac36b7d-ada8-4fc5-8c08-976731903d3c"
         stylist_id = "reginald"
         image_id = "item4"
@@ -668,6 +694,7 @@ if __name__ == "__main__":
                     print("-" * 30)
                     print(f"Product: {product['product_text']}")
                     print(f"Retailer: {product['retailer']}")
+                    print(f"brand: {product['brand']}")
                     print(f"Product ID: {product['product_id']}")
                     print(f"Product URL: {product.get('url', 'Not available')}")
                     print(f"Match Score: {product['similarity_score']:.2f}")

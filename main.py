@@ -151,8 +151,10 @@ class StandardResponse(BaseModel):
 class ProductRecommendation(BaseModel):
     category: str
     product_id: str
+    price: float
     product_text: str
     retailer: str
+    brand: str
     similarity_score: float
     image_urls: List[str]
     url: str
@@ -469,23 +471,40 @@ async def handle_chat(data: ChatRequest):
         
         parsed_result = json.loads(result)
         text = parsed_result.get("text", "No response text found.")
-        image_ids = parsed_result.get("value", [])
 
-        # Process wardrobe images more efficiently
+        print(parsed_result, "parsed_result")
+        # Get wardrobe images
+        # Get wardrobe images
         images = []
-        for image_id in image_ids:
-            matching_item = next(
-                (item for item in wardrobe_data if item["token_name"] == image_id),
-                None
-            )
-            if matching_item:
-                images.append(WardrobeImage(
-                    image_id=image_id,
-                    image_url=matching_item["image_url"],
-                    token_name=matching_item["token_name"]
-                ))
+        value_items = parsed_result.get("value", [])
+        if value_items and isinstance(value_items, list):
+            # Initialize set for product IDs
+            product_ids = set()
+            
+            # Handle both string IDs and dictionary items
+            for item in value_items:
+                if isinstance(item, dict) and "product_id" in item:
+                    # Handle dictionary format
+                    product_ids.add(item["product_id"])
+                elif isinstance(item, str):
+                    # Handle direct string ID format
+                    product_ids.add(item)
+            
+            # Match product IDs against wardrobe items
+            for product_id in product_ids:
+                matching_item = next(
+                    (item for item in wardrobe_data if item["token_name"] == product_id),
+                    None
+                )
+                if matching_item:
+                    images.append(WardrobeImage(
+                        image_id=product_id,
+                        image_url=matching_item["image_url"],
+                        token_name=matching_item["token_name"]
+                    ))
 
-        # Process recommendations if available
+        print(images, "images")
+        # Process recommendations
         recommendations = None
         if "recommendations" in parsed_result:
             recs = parsed_result["recommendations"]
@@ -493,27 +512,48 @@ async def handle_chat(data: ChatRequest):
             # Format product recommendations
             products = []
             for product in recs.get("products", []):
-                products.append(ProductRecommendation(
-                    category=product["category"],
-                    product_id=product["product_id"],
-                    product_text=product["product_text"],
-                    retailer=product["retailer"],
-                    similarity_score=product["similarity_score"],
-                    image_urls=product.get("image_urls", []),
-                    url=product.get("url", ""),
-                    suggestion=recs.get("category_suggestions", {}).get(product["category"], ""),
-                    gender=product.get("gender", ""),
-                    styling_tips=product.get("styling_tips", [])
-                ))
-            
-            recommendations = Recommendations(
-                category_suggestions=recs.get("category_suggestions", {}),
-                products=products
-            )
+                try:
+                    # Handle product text which might be string or dictionary
+                    if isinstance(product.get("product_text"), dict):
+                        product_text = " ".join(str(v) for v in product["product_text"].values() if v)
+                    else:
+                        product_text = str(product.get("product_text", ""))
 
-        # Include shopping analysis if available
+                    # Handle price - ensure it's a string
+                    price = product.get("price", "")
+                    if isinstance(price, (int, float)):
+                        price = str(price)
+
+                    # Create product recommendation
+                    products.append(ProductRecommendation(
+                        category=product.get("category", ""),
+                        product_id=product.get("product_id", ""),
+                        product_text=product_text,
+                        price=price,
+                        brand=product.get("brand", ""),
+                        retailer=product.get("retailer", ""),
+                        similarity_score=float(product.get("similarity_score", 0.0)),
+                        image_urls=product.get("image_urls", []),
+                        url=product.get("url", ""),
+                        suggestion=recs.get("category_suggestions", {}).get(product.get("category", ""), ""),
+                        gender=product.get("gender", ""),
+                        styling_tips=product.get("styling_tips", [])
+                    ))
+                except Exception as e:
+                    print(f"Error processing product: {str(e)}")
+                    continue
+
+            # Only create recommendations if we have valid products
+            if products:
+                recommendations = Recommendations(
+                    category_suggestions=recs.get("category_suggestions", {}),
+                    products=products
+                )
+
+        # Get shopping analysis if available
         shopping_analysis = parsed_result.get("shopping_analysis")
 
+        # Return chat response
         return ChatResponse(
             reply=text,
             images=images,
@@ -521,8 +561,12 @@ async def handle_chat(data: ChatRequest):
             shopping_analysis=shopping_analysis
         )
     
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse response: {str(e)}")
     except Exception as e:
-        # logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
+        print(f"Error in handle_chat: {str(e)}")
+        print(f"Result was: {result}")  # Log the raw result for debugging
         raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
 class ImageUploadRequest(BaseModel):
     email: str

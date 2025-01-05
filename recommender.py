@@ -79,13 +79,17 @@ class ProductRecommender:
                 "You are a professional fashion stylist. Based on the query and user profile, "
                 "suggest specific items for each clothing category needed for a complete outfit. "
                 "Return ONLY a JSON dictionary where keys are basic clothing categories "
-                "(like 'shirt', 'pants', 'dress', 'shoes', 'accessories' etc.) and values are detailed "
-                "descriptions of recommended items. Each description should include color, style, fit, and material. "
-                "Example format: {'dress': 'A flowy midi dress in emerald green silk with...', "
-                "'shoes': 'Strappy beige sandals with...'}. Only include relevant categories for the specific outfit. "
-                "Consider the user's gender when making recommendations."
+                "and values are detailed descriptions as SINGLE strings. Do not provide "
+                "sub-categories or multiple items within any category. "
+                "Example descriptions for different categories:\n"
+                "{'shirt': 'A light blue oxford cotton button-down with a slim fit and pearly buttons', \n"
+                "'t-shirt': 'A classic white crew neck cotton t-shirt with a relaxed fit', \n"
+                "'hoodie': 'A heather gray cotton-blend zip-up hoodie with ribbed cuffs', \n"
+                "'watch': 'A minimalist silver chronograph with a navy blue dial and steel bracelet', \n"
+                "'sunglasses': 'Classic black aviator sunglasses with gold metal frames', \n"
+                "'shoes': 'Brown leather derby shoes with contrast stitching and rubber soles'}. \n"
+                "Each category should have one clear, detailed description."
             )
-
             user_prompt = (
                 f"User Query: {query}\n\n"
                 f"Profile Information:\n"
@@ -183,7 +187,7 @@ class ProductRecommender:
                             .execute()
                             
                         
-                        # exit(-1)
+                      
                         if not product_response.data or not product_response.data[0]:
                             continue
                             
@@ -192,17 +196,21 @@ class ProductRecommender:
                         
                         # Check if gender matches or if no gender preference
                         if not user_gender or product_gender == user_gender or product_gender == 'unisex':
+                            # print("retaile", prod_data.get('brand', ''))
+                    
                             category_products[category] = {
                                 'product_id': product_id,
                                 'similarity_score': float(similarities[idx]),
                                 'product_text': self.embeddings_dict[product_id]['text'],
                                 'gender': product_gender,
                                 'retailer': retailer_table,
+                                'brand': prod_data.get('brand', ''),
                                 'image_urls': prod_data.get('image_urls', []),
                                 'url': prod_data.get('url', ''),  # Product URL
                                 'price': prod_data.get('price', ''),  # Product price
                                 'name': prod_data.get('name', ''),  # Product name
-                                'description': prod_data.get('description', '')
+                                'description': prod_data.get('description', ''),
+                                'colors': prod_data.get('colors', []),
                             }
                             # print(category_products[category], " category_products[category]")
                             product_found = True
@@ -392,10 +400,12 @@ class ProductRecommender:
                         'category': category,
                         'suggestion': suggestion,
                         'product_id': product['product_id'],
-                        'product_text': product['product_text'],
+                        # 'product_text': product['name'],
+                        'product_text': suggestion,
                         'similarity_score': product['similarity_score'],
                         'gender': product.get('gender'),
                         'retailer': product.get('retailer'),
+                        'brand': product.get('brand', ''),
                         'image_urls': product_images.get(product['product_id'], []),
                         'url': product.get('url', ''),
                         'price': product.get('price', ''),
