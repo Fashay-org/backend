@@ -44,6 +44,7 @@ class FashionAssistant:
     def __init__(self, stylist_id="reginald"):
             self.current_stylist_id = stylist_id.lower()
             self.user_threads = {}
+            self.conversation_context = {}
             self.last_interaction = {}
             self.max_history = 10
             self.stylist_personalities = {
@@ -58,11 +59,13 @@ class FashionAssistant:
             }
             
             # Initialize the product recommender with shared thread management
+            # self.product_recommender = ProductRecommender()
             self.product_recommender = ProductRecommender(
                 thread_manager={
                     'get_thread': self._get_or_create_thread,
                     'user_threads': self.user_threads,
-                    'last_interaction': self.last_interaction
+                    'last_interaction': self.last_interaction,
+                    'conversation_context': self.conversation_context
                 }
             )
             
@@ -155,16 +158,24 @@ class FashionAssistant:
         thread_key = self._get_thread_key(unique_id, stylist_id)
         current_time = time.time()
         
+        # Initialize or get context
+        if thread_key not in self.conversation_context:
+            self.conversation_context[thread_key] = {
+                'last_query': None,
+                'occasion': None,
+                'style_preferences': None,
+                'last_recommendations': None
+            }
+        
         if thread_key in self.user_threads:
             self.last_interaction[thread_key] = current_time
             return self.user_threads[thread_key]
         
-        thread = client.beta.threads.create()
+        thread = self.client.beta.threads.create()
         self.user_threads[thread_key] = thread.id
         self.last_interaction[thread_key] = current_time
         
         self._cleanup_old_threads()
-        
         return thread.id
 
     def reset_conversation(self, unique_id: str, stylist_id: str):
@@ -245,30 +256,97 @@ class FashionAssistant:
             }
     @traceable
     async def process_user_input(self, state: State) -> Dict[str, Any]:
-        """Process the initial user input and add context"""
+        """Process the initial user input and maintain context while handling wardrobe items"""
+        # Get or initialize context
+        thread_key = self._get_thread_key(state["unique_id"], state["stylist_id"])
+        
+        if thread_key not in self.conversation_context:
+            self.conversation_context[thread_key] = {
+                'last_query': None,
+                'occasion': None,
+                'style_preferences': None,
+                'last_recommendations': None
+            }
+        context = self.conversation_context[thread_key]
+
+        # Get stylist personality context
         stylist_context = self.stylist_personalities.get(
             state["stylist_id"].lower(),
             "I am your personal fashion stylist, focused on helping you create stylish and confident looks."
         )
 
+        # Process wardrobe items
         wardrobe_items = "\n".join(
             f"- {item['caption']} (ID: {item['token_name']})" 
             for item in state["wardrobe_data"]
         )
         
+        # Handle target item
         if state["image_id"] and state["image_id"] != "general_chat":
             target_item = next(
                 (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
                 None
             )
-            
             target_context = f"""Target Item: {target_item['caption'] if target_item else 'Unknown item'} (ID: {state['image_id']})
             Please provide recommendations that complement this target item."""
         else:
             target_context = "No specific target item. Please provide recommendations based on the available wardrobe items."
 
+        # Extract context from the query
+        thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
+        message = self.client.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=[{"type": "text", "text": f"""
+            Analyze this query and extract:
+            1. Occasion/event (if mentioned)
+            2. Style preferences
+            3. Any specific requirements
+
+            Previous context:
+            - Previous occasion: {context['occasion']}
+            - Previous query: {context['last_query']}
+            
+            Current query: {state['user_query']}
+            
+            Return ONLY a JSON with this structure:
+            {{
+                "occasion": "extracted occasion or previous occasion if none mentioned",
+                "style_preferences": ["list", "of", "preferences"],
+                "specific_requirements": ["list", "of", "requirements"]
+            }}"""}]
+        )
+        
+        run = self.client.beta.threads.runs.create(
+            thread_id=thread_id,
+            assistant_id=self.assistant.id
+        )
+        
+        while True:
+            run_status = self.client.beta.threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run.id
+            )
+            if run_status.status == "completed":
+                break
+            await asyncio.sleep(1)
+        
+        messages = self.client.beta.threads.messages.list(thread_id=thread_id)
+        analysis = json.loads(messages.data[0].content[0].text.value)
+        
+        # Update context
+        context['last_query'] = state['user_query']
+        context['occasion'] = analysis['occasion']
+        context['style_preferences'] = analysis['style_preferences']
+
+        # Combine all context into enhanced query
         enhanced_query = f"""STYLIST CONTEXT:
         {stylist_context}
+
+        CONVERSATION CONTEXT:
+        Occasion: {context['occasion']}
+        Style Preferences: {', '.join(context['style_preferences'])}
+        Previous Query: {context['last_query']}
 
         SITUATION CONTEXT:
         {target_context}
@@ -276,7 +354,8 @@ class FashionAssistant:
         Available Wardrobe Items:
         {wardrobe_items}
 
-        User Query: {state['user_query']}"""
+        Current User Query: {state['user_query']}
+        Specific Requirements: {', '.join(analysis['specific_requirements'])}"""
         
         return {
             "messages": state.get("messages", []) + [enhanced_query],

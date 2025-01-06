@@ -16,14 +16,17 @@ class ProductRecommender:
             os.environ.get("SUPABASE_URL"),
             os.environ.get("SUPABASE_KEY")
         )
+        
         # Use shared thread management if provided, otherwise create own
         if thread_manager:
             self._get_or_create_thread = thread_manager['get_thread']
             self.user_threads = thread_manager['user_threads']
             self.last_interaction = thread_manager['last_interaction']
+            self.conversation_context = thread_manager['conversation_context']
         else:
             self.user_threads = {}
             self.last_interaction = {}
+            self.conversation_context = {}
         print("Loading product embeddings...")
         self.assistant = self._create_assistant() 
         try:
@@ -94,17 +97,17 @@ class ProductRecommender:
             raise
     # def _get_thread_key(self, unique_id, stylist_id):
     #     return f"{unique_id}_{stylist_id}"
-    def _cleanup_old_threads(self, max_age_hours=24):
-        current_time = time.time()
-        threads_to_remove = []
+    # def _cleanup_old_threads(self, max_age_hours=24):
+    #     current_time = time.time()
+    #     threads_to_remove = []
         
-        for thread_key, last_time in self.last_interaction.items():
-            if current_time - last_time > max_age_hours * 3600:
-                threads_to_remove.append(thread_key)
+    #     for thread_key, last_time in self.last_interaction.items():
+    #         if current_time - last_time > max_age_hours * 3600:
+    #             threads_to_remove.append(thread_key)
         
-        for thread_key in threads_to_remove:
-            del self.user_threads[thread_key]
-            del self.last_interaction[thread_key]
+    #     for thread_key in threads_to_remove:
+    #         del self.user_threads[thread_key]
+    #         del self.last_interaction[thread_key]
     # def _get_or_create_thread(self, unique_id, stylist_id):
     #     thread_key = self._get_thread_key(unique_id, stylist_id)
     #     current_time = time.time()
@@ -117,7 +120,7 @@ class ProductRecommender:
     #     self.user_threads[thread_key] = thread.id
     #     self.last_interaction[thread_key] = current_time
         
-    #     # self._cleanup_old_threads()
+    #     self._cleanup_old_threads()
         
     #     return thread.id
     async def get_user_profile(self, user_id: str) -> Dict:
@@ -146,41 +149,84 @@ class ProductRecommender:
             return None
 
     def get_gpt_recommendations(self, query: str, profile: Dict, user_id: str, stylist_id: str) -> Dict[str, str]:
-        """Get outfit recommendations from GPT-4 in category format"""
+        """Get outfit recommendations with shared context awareness"""
         try:
+            # Get thread key and shared context
+            thread_key = f"{user_id}_{stylist_id}"
+            if thread_key not in self.conversation_context:
+                self.conversation_context[thread_key] = {
+                    'last_query': None,
+                    'occasion': None,
+                    'style_preferences': None,
+                    'last_recommendations': None
+                }
+            context = self.conversation_context[thread_key]
+
+            # Create context-aware prompt
+            system_prompt = """You are a product recommendation assistant specializing in fashion products. 
+
+            Consider the following context:
+            Previous occasion: {last_occasion}
+            Previous query: {last_query}
+            Current query: {query}
+            Previous style preferences: {style_preferences}
+            
+            User Profile:
+            - Gender: {gender}
+            - Favorite Styles: {styles}
+            - Favorite Colors: {colors}
+            - Body Shape: {body_shape}
+            - Preferred Materials: {materials}
+            - Style Preferences: {style_prefs}
+
+            If the current query asks for alternatives or different suggestions,
+            maintain the same occasion but provide different outfit recommendations.
+            
+            Key Requirements:
+            1. ALWAYS return recommendations in valid JSON format
+            2. For each clothing category, provide ONE detailed description
+            3. Focus on practical, specific item descriptions that can be used for product matching
+            4. Consider seasonal appropriateness, occasion, and style preferences
+            5. Include color, material, and style details in descriptions
+            
+            Return ONLY a JSON with this exact structure:
+            {{
+                "occasion": "current occasion or previous if not specified",
+                "shirt": "detailed description of recommended shirt",
+                "pants": "detailed description of recommended pants",
+                "shoes": "detailed description of recommended shoes",
+                "accessories": "detailed description of recommended accessories"
+            }}
+            
+            Guidelines:
+            - Keep descriptions clear and specific
+            - Include material, color, and style details
+            - Focus on one clear item per category
+            - Ensure descriptions are detailed enough for matching
+            - Consider gender appropriateness when specified
+            - Include fit details where relevant""".format(
+                last_occasion=context.get('occasion'),
+                last_query=context.get('last_query'),
+                query=query,
+                style_preferences=', '.join(context.get('style_preferences', [])) if context.get('style_preferences') else 'None',
+                gender=profile.get('gender', 'Not specified'),
+                styles=', '.join(profile.get('favorite_styles', [])),
+                colors=', '.join(profile.get('favorite_colors', [])),
+                body_shape=profile.get('body_shape_info', ''),
+                materials=', '.join(profile.get('favorite_materials', [])),
+                style_prefs=', '.join(filter(None, [profile.get(f'style_determined_{i}', '') for i in range(1, 6)]))
+            )
+
+            # Get thread
             thread_id = self._get_or_create_thread(user_id, stylist_id)
 
-            system_prompt = (
-                "You are a professional fashion stylist. Based on the query and user profile, "
-                "suggest specific items for each clothing category needed for a complete outfit. "
-                "Return ONLY a JSON dictionary where keys are basic clothing categories "
-                "and values are detailed descriptions as SINGLE strings. Do not provide "
-                "sub-categories or multiple items within any category. "
-                "Example descriptions for different categories:\n"
-                "{'shirt': 'A light blue oxford cotton button-down with a slim fit and pearly buttons', \n"
-                "'t-shirt': 'A classic white crew neck cotton t-shirt with a relaxed fit', \n"
-                "'hoodie': 'A heather gray cotton-blend zip-up hoodie with ribbed cuffs', \n"
-                "'watch': 'A minimalist silver chronograph with a navy blue dial and steel bracelet', \n"
-                "'sunglasses': 'Classic black aviator sunglasses with gold metal frames', \n"
-                "'shoes': 'Brown leather derby shoes with contrast stitching and rubber soles'}. \n"
-                "Each category should have one clear, detailed description."
-            )
-            user_prompt = (
-                f"User Query: {query}\n\n"
-                f"Profile Information:\n"
-                f"- Gender: {profile.get('gender', 'Not specified')}\n"
-                f"- Favorite Styles: {', '.join(profile.get('favorite_styles', []))}\n"
-                f"- Favorite Colors: {', '.join(profile.get('favorite_colors', []))}\n"
-                f"- Body Shape: {profile.get('body_shape_info', '')}\n"
-                f"- Preferred Materials: {', '.join(profile.get('favorite_materials', []))}\n"
-                f"- Style Preferences: {', '.join(filter(None, [profile.get(f'style_determined_{i}', '') for i in range(1, 6)]))}"
-            )
             # Create message in thread
             message = self.client.beta.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
-                content=[{"type": "text", "text": system_prompt + "\n\n" + user_prompt}]
+                content=[{"type": "text", "text": system_prompt}]
             )
+            
             # Create and wait for run
             run = self.client.beta.threads.runs.create(
                 thread_id=thread_id,
@@ -198,8 +244,13 @@ class ProductRecommender:
             
             messages = self.client.beta.threads.messages.list(thread_id=thread_id)
             recommendations = json.loads(messages.data[0].content[0].text.value)
-            return recommendations
+            
+            # No need to update context here as it's managed by FashionAssistant
+            # Just save the recommendations
+            context['last_recommendations'] = recommendations
 
+            return recommendations
+            
         except Exception as e:
             print(f"Error getting GPT recommendations: {str(e)}")
             return None
@@ -232,82 +283,93 @@ class ProductRecommender:
                 return None
 
     def get_category_recommendations(self, category_suggestions: Dict[str, str], user_gender: str = None) -> Dict[str, Dict]:
-        """Get product recommendations for each category, considering gender"""
+        print("\n=== Starting category recommendations ===")
         category_products = {}
         
         for category, description in category_suggestions.items():
-            # Get embedding for category description
-            embedding = self.get_embedding(description)
-            if embedding:
-                # Get initial matches
-                query_embedding = np.array(embedding).reshape(1, -1)
-                similarities = cosine_similarity(query_embedding, self.embeddings_array)[0]
+            # print(f"\nProcessing category: {category}")
+            try:
+                # Create fresh Supabase client for each category to avoid connection timeouts
+                # print(f"Creating new Supabase client for {category}")
+                supabase = create_client(
+                    os.environ.get("SUPABASE_URL"),
+                    os.environ.get("SUPABASE_KEY")
+                )
                 
-                # Get top matches sorted by similarity
-                top_indices = similarities.argsort()[::-1]
-                
-                # Find the first product that matches the gender requirement
-                product_found = False
-                for idx in top_indices:
-                    product_id = self.product_ids[idx]
+                # print(f"Getting embedding for {category}")
+                embedding = self.get_embedding(description)
+                if embedding:
+                    # print("Got embedding, calculating similarities")
+                    query_embedding = np.array(embedding).reshape(1, -1)
+                    similarities = cosine_similarity(query_embedding, self.embeddings_array)[0]
+                    top_indices = similarities.argsort()[::-1]
                     
-                    try:
-                        # Extract retailer table and original product id
-                        reference_response = self.supabase.table("product_references")\
-                            .select("retailer_table, product_id")\
-                            .eq("id", product_id)\
-                            .execute()
+                    # print(f"Starting product search for {category}")
+                    for idx in top_indices:
+                        product_id = self.product_ids[idx]
+                        # print(f"Checking product ID: {product_id}")
+                        
+                        try:
+                            # print("Querying product_references table")
+                            reference_response = supabase.table("product_references")\
+                                .select("retailer_table, product_id")\
+                                .eq("id", product_id)\
+                                .execute()
+                                
+                            if not reference_response.data or not reference_response.data[0]:
+                                print("No reference data found")
+                                continue
+                                
+                            ref_data = reference_response.data[0]
+                            retailer_table = ref_data['retailer_table']
+                            original_product_id = ref_data['product_id']
                             
-                        if not reference_response.data or not reference_response.data[0]:
+                            # print(f"Querying retailer table: {retailer_table}")
+                            product_response = supabase.table(retailer_table)\
+                                .select("*")\
+                                .eq("id", original_product_id)\
+                                .execute()
+                            
+                            if not product_response.data or not product_response.data[0]:
+                                print("No product data found")
+                                continue
+                                
+                            # print("Found product data, checking gender match")
+                            prod_data = product_response.data[0]
+                            product_gender = prod_data.get('gender', '')
+                            
+                            if not user_gender or product_gender == user_gender or product_gender == 'unisex':
+                                # print(f"Found matching product for {category}")
+                                category_products[category] = {
+                                    'product_id': product_id,
+                                    'similarity_score': float(similarities[idx]),
+                                    'product_text': self.embeddings_dict[product_id]['text'],
+                                    'gender': product_gender,
+                                    'retailer': retailer_table,
+                                    'brand': prod_data.get('brand', ''),
+                                    'image_urls': prod_data.get('image_urls', []),
+                                    'url': prod_data.get('url', ''),
+                                    'price': prod_data.get('price', ''),
+                                    'name': prod_data.get('name', ''),
+                                    'description': prod_data.get('description', ''),
+                                    'colors': prod_data.get('colors', []),
+                                }
+                                break
+                            else:
+                                print(f"Gender mismatch: Product={product_gender}, User={user_gender}")
+                                
+                        except Exception as e:
+                            print(f"Error during product check: {str(e)}")
                             continue
                             
-                        ref_data = reference_response.data[0]  # Get first item from response data
-                        retailer_table = ref_data['retailer_table']
-                        original_product_id = ref_data['product_id']
-                        
-                        # Get product details including gender
-                        product_response = self.supabase.table(retailer_table)\
-                            .select("*")\
-                            .eq("id", original_product_id)\
-                            .execute()
-                            
-                        
-                      
-                        if not product_response.data or not product_response.data[0]:
-                            continue
-                            
-                        prod_data = product_response.data[0]  # Get first item from response data
-                        product_gender = prod_data.get('gender', '')
-                        
-                        # Check if gender matches or if no gender preference
-                        if not user_gender or product_gender == user_gender or product_gender == 'unisex':
-                            # print("retaile", prod_data.get('brand', ''))
-                    
-                            category_products[category] = {
-                                'product_id': product_id,
-                                'similarity_score': float(similarities[idx]),
-                                'product_text': self.embeddings_dict[product_id]['text'],
-                                'gender': product_gender,
-                                'retailer': retailer_table,
-                                'brand': prod_data.get('brand', ''),
-                                'image_urls': prod_data.get('image_urls', []),
-                                'url': prod_data.get('url', ''),  # Product URL
-                                'price': prod_data.get('price', ''),  # Product price
-                                'name': prod_data.get('name', ''),  # Product name
-                                'description': prod_data.get('description', ''),
-                                'colors': prod_data.get('colors', []),
-                            }
-                            # print(category_products[category], " category_products[category]")
-                            product_found = True
-                            break
-                            
-                    except Exception as e:
-                        print(f"Error checking product: {str(e)}")
-                        continue
-                
-                if not product_found:
-                    print(f"Warning: No gender-appropriate product found for category {category}")
+            except Exception as e:
+                print(f"Error processing category {category}: {str(e)}")
+                continue
+
+            if category not in category_products:
+                print(f"Warning: No suitable product found for category {category}")
         
+        print("\n=== Finished category recommendations ===")
         return category_products
     def get_final_recommendations(self, query: str, category_suggestions: Dict[str, str], 
                                 category_products: Dict[str, Dict], user_id: str, stylist_id: str) -> str:
@@ -453,19 +515,27 @@ class ProductRecommender:
             # Get user gender
             user_gender = profile.get('gender', None)
             
+            print("getting gpt recommendations")
             # Get initial category-based GPT recommendations
-            category_suggestions = self.get_gpt_recommendations(query, profile, user_id, stylist_id)
+            category_suggestions = self.get_gpt_recommendations(
+                query=query,
+                profile=profile,
+                user_id=user_id,
+                stylist_id=stylist_id  # This will use the same thread as FashionAssistant
+            )
             if not category_suggestions:
                 return {"error": "Failed to generate GPT recommendations"}
             
             # Get product recommendations for each category with gender matching
             import time
             timenew = time.time()
+            # print("getting category recommendations")
             category_products = self.get_category_recommendations(category_suggestions, user_gender)
-            print("Time taken for get_category_recommendations: ", time.time()-timenew)
+            # print("completed category recommendations")
+            # print("Time taken for get_category_recommendations: ", time.time()-timenew)
             if not category_products:
                 return {"error": "No suitable products found matching gender preference"}
-            
+            # print("getting final recommendations")
             # Get final styled recommendations
             final_recommendations = self.get_final_recommendations(
                 query, 
