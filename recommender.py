@@ -7,19 +7,27 @@ from typing import Dict, List, Any
 import pickle
 from sklearn.metrics.pairwise import cosine_similarity
 import json
-
+import time
 class ProductRecommender:
-    def __init__(self):
+    def __init__(self, thread_manager: Dict = None):
         load_dotenv()
         self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY2"))
         self.supabase = create_client(
             os.environ.get("SUPABASE_URL"),
             os.environ.get("SUPABASE_KEY")
         )
-        
+        # Use shared thread management if provided, otherwise create own
+        if thread_manager:
+            self._get_or_create_thread = thread_manager['get_thread']
+            self.user_threads = thread_manager['user_threads']
+            self.last_interaction = thread_manager['last_interaction']
+        else:
+            self.user_threads = {}
+            self.last_interaction = {}
         print("Loading product embeddings...")
+        self.assistant = self._create_assistant() 
         try:
-            with open('Final_embeddings/embeddings_backup_8900.pkl', 'rb') as f:
+            with open('Final_embeddings/product_embeddings_final.pkl', 'rb') as f:
                 loaded_data = pickle.load(f)
             
             if isinstance(loaded_data, dict):
@@ -47,6 +55,71 @@ class ProductRecommender:
             print(f"Error loading embeddings: {str(e)}")
             raise
 
+    def _create_assistant(self):
+        """Create an OpenAI assistant for product recommendations"""
+        try:
+            assistant = self.client.beta.assistants.create(
+                name="Product Recommender",
+                instructions="""You are a product recommendation assistant specializing in fashion products. Your role is to analyze queries and suggest specific clothing items and accessories based on user needs.
+
+                Key Requirements:
+                1. ALWAYS return recommendations in valid JSON format
+                2. For each clothing category, provide ONE detailed description
+                3. Focus on practical, specific item descriptions that can be used for product matching
+                4. Consider seasonal appropriateness, occasion, and style preferences
+                5. Include color, material, and style details in descriptions
+
+                Response Format Example:
+                {
+                    "shirt": "A light blue cotton Oxford button-down with a slim fit and white buttons",
+                    "pants": "Charcoal grey wool dress slacks with a tapered fit and flat front",
+                    "shoes": "Brown leather cap-toe Oxford shoes with Goodyear welted soles",
+                    "accessories": "Silver stainless steel chronograph watch with a black leather strap"
+                }
+
+                Guidelines:
+                - Keep descriptions clear and specific
+                - Include material, color, and style details
+                - Focus on one clear item per category
+                - Ensure descriptions are detailed enough for matching
+                - Consider gender appropriateness when specified
+                - Include fit details where relevant
+                - Consider the occasion and context of the request""",
+                            model="gpt-4o-mini",
+                            tools=[]
+                        )
+            return assistant
+        except Exception as e:
+            print(f"Error creating assistant: {str(e)}")
+            raise
+    # def _get_thread_key(self, unique_id, stylist_id):
+    #     return f"{unique_id}_{stylist_id}"
+    def _cleanup_old_threads(self, max_age_hours=24):
+        current_time = time.time()
+        threads_to_remove = []
+        
+        for thread_key, last_time in self.last_interaction.items():
+            if current_time - last_time > max_age_hours * 3600:
+                threads_to_remove.append(thread_key)
+        
+        for thread_key in threads_to_remove:
+            del self.user_threads[thread_key]
+            del self.last_interaction[thread_key]
+    # def _get_or_create_thread(self, unique_id, stylist_id):
+    #     thread_key = self._get_thread_key(unique_id, stylist_id)
+    #     current_time = time.time()
+        
+    #     if thread_key in self.user_threads:
+    #         self.last_interaction[thread_key] = current_time
+    #         return self.user_threads[thread_key]
+        
+    #     thread = self.client.beta.threads.create()
+    #     self.user_threads[thread_key] = thread.id
+    #     self.last_interaction[thread_key] = current_time
+        
+    #     # self._cleanup_old_threads()
+        
+    #     return thread.id
     async def get_user_profile(self, user_id: str) -> Dict:
         """Fetch user profile and preferences from database"""
         try:
@@ -72,9 +145,11 @@ class ProductRecommender:
             print(f"Error fetching user profile: {str(e)}")
             return None
 
-    def get_gpt_recommendations(self, query: str, profile: Dict) -> Dict[str, str]:
+    def get_gpt_recommendations(self, query: str, profile: Dict, user_id: str, stylist_id: str) -> Dict[str, str]:
         """Get outfit recommendations from GPT-4 in category format"""
         try:
+            thread_id = self._get_or_create_thread(user_id, stylist_id)
+
             system_prompt = (
                 "You are a professional fashion stylist. Based on the query and user profile, "
                 "suggest specific items for each clothing category needed for a complete outfit. "
@@ -100,25 +175,35 @@ class ProductRecommender:
                 f"- Preferred Materials: {', '.join(profile.get('favorite_materials', []))}\n"
                 f"- Style Preferences: {', '.join(filter(None, [profile.get(f'style_determined_{i}', '') for i in range(1, 6)]))}"
             )
-
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=500,
-                response_format={ "type": "json_object" }
+            # Create message in thread
+            message = self.client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=[{"type": "text", "text": system_prompt + "\n\n" + user_prompt}]
+            )
+            # Create and wait for run
+            run = self.client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=self.assistant.id
             )
             
-            # Parse the JSON response
-            recommendations = json.loads(response.choices[0].message.content)
+            while True:
+                run_status = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run.id
+                )
+                if run_status.status == "completed":
+                    break
+                time.sleep(1)
+            
+            messages = self.client.beta.threads.messages.list(thread_id=thread_id)
+            recommendations = json.loads(messages.data[0].content[0].text.value)
             return recommendations
 
         except Exception as e:
             print(f"Error getting GPT recommendations: {str(e)}")
             return None
+
 
     def get_embedding(self, text: str | dict) -> List[float]:
             """Get embedding for text using OpenAI API"""
@@ -225,90 +310,91 @@ class ProductRecommender:
         
         return category_products
     def get_final_recommendations(self, query: str, category_suggestions: Dict[str, str], 
-                                    category_products: Dict[str, Dict]) -> str:
-            """Get final styled recommendations in strict JSON format"""
-            try:
-                system_prompt = (
-                    "You are a fashion recommendation system. Return a JSON object with EXACTLY this structure:\n"
-                    "{\n"
-                    "    'items': [\n"
-                    "        {\n"
-                    "            'category': 'Category name',\n"
-                    "            'product_id': 'ID of the product',\n"
-                    "            'styling_tips': ['Tip 1', 'Tip 2']\n"
-                    "        }\n"
-                    "    ],\n"
-                    "    'query_fit': 'How this outfit matches the query'\n"
-                    "}\n\n"
-                    "Ensure evrything is in the exact JSON structure. Keep it concise and relevant to the query."
+                                category_products: Dict[str, Dict], user_id: str, stylist_id: str) -> str:
+        """Get final styled recommendations in strict JSON format"""
+        try:
+            thread_id = self._get_or_create_thread(user_id, stylist_id)
+            
+            system_prompt = """You are a fashion recommendation system. Return a JSON object with EXACTLY this structure:
+            {
+                'items': [
+                    {
+                        'category': 'Category name',
+                        'product_id': 'ID of the product',
+                        'styling_tips': ['Tip 1', 'Tip 2']
+                    }
+                ],
+                'query_fit': 'How this outfit matches the query'
+            }"""
+
+            # Format products with all available information
+            products_list = []
+            for category, product in category_products.items():
+                products_list.append(
+                    f"{category.title()}:\n"
+                    f"- Product: {product['product_text']}\n"
+                    f"- ID: {product['product_id']}\n"
+                    f"- Gender: {product.get('gender', 'Not specified')}\n"
+                    f"- Original Suggestion: {category_suggestions[category]}"
                 )
+            
+            products_formatted = "\n\n".join(products_list)
 
-                # Format products with all available information
-                products_list = []
-                for category, product in category_products.items():
-                    products_list.append(
-                        f"{category.title()}:\n"
-                        f"- Product: {product['product_text']}\n"
-                        f"- ID: {product['product_id']}\n"
-                        f"- Gender: {product['gender']}\n"
-                        f"- Original Suggestion: {category_suggestions[category]}"
-                    )
-                
-                products_formatted = "\n\n".join(products_list)
+            user_prompt = f"""Query: {query}
 
-                user_prompt = (
-                    f"Query: {query}\n\n"
-                    f"Available Products:\n{products_formatted}\n\n"
-                    "Create a cohesive outfit recommendation in the required JSON format:\n"
-                    "1. Include every selected item with its ID\n"
-                    "2. Provide specific styling tips for each piece\n"
-                    "3. Explain how the pieces work together\n"
-                    "4. Focus on how the outfit fulfills the original query\n"
-                    "5. Maintain the exact JSON structure specified"
+            Available Products:
+            {products_formatted}
+
+            Create a cohesive outfit recommendation in the required JSON format:
+            1. Include every selected item with its ID
+            2. Provide specific styling tips for each piece
+            3. Explain how the pieces work together
+            4. Focus on how the outfit fulfills the original query
+            5. Maintain the exact JSON structure specified"""
+
+            # Create message in thread
+            message = self.client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=[{"type": "text", "text": system_prompt + "\n\n" + user_prompt}]
+            )
+            
+            # Create and wait for run
+            run = self.client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=self.assistant.id
+            )
+            
+            while True:
+                run_status = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run.id
                 )
-
-                response = self.client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.3,  # Lower temperature for more consistent structure
-                    max_tokens=800,
-                    response_format={ "type": "json_object" }
-                )
-                
-                # Parse and validate JSON structure
-                try:
-                    recommendation = json.loads(response.choices[0].message.content)
-                    
-                    # Validate required fields
-                    required_fields = ['items', 'query_fit']
-                    for field in required_fields:
-                        if field not in recommendation:
-                            raise ValueError(f"Missing required field: {field}")
-                    
-                    # Validate items structure
-                    for item in recommendation['items']:
-                        required_item_fields = ['product_id', 'styling_tips']
-                        for field in required_item_fields:
-                            if field not in item:
-                                raise ValueError(f"Missing required item field: {field}")
-                    
-                    # Return the validated JSON as a string
-                    return json.dumps(recommendation, indent=2)
-                    
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing GPT response as JSON: {str(e)}")
-                    return None
-                    
-                except ValueError as e:
-                    print(f"Invalid JSON structure: {str(e)}")
-                    return None
-
-            except Exception as e:
-                print(f"Error getting recommendations: {str(e)}")
-                return None
+                if run_status.status == "completed":
+                    break
+                time.sleep(1)
+            
+            messages = self.client.beta.threads.messages.list(thread_id=thread_id)
+            latest_message = messages.data[0].content[0].text.value
+            
+            # Parse and validate JSON
+            recommendation = json.loads(latest_message)
+            required_fields = ['items', 'query_fit']
+            for field in required_fields:
+                if field not in recommendation:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            for item in recommendation['items']:
+                required_item_fields = ['product_id', 'styling_tips']
+                for field in required_item_fields:
+                    if field not in item:
+                        raise ValueError(f"Missing required item field: {field}")
+            
+            return json.dumps(recommendation, indent=2)
+            
+        except Exception as e:
+            print(f"Error getting recommendations: {str(e)}")
+            return None
 
     async def get_product_images(self, product_reference_ids: List[str]) -> Dict[str, List[str]]:
         """Fetch product images from appropriate retailer tables"""
@@ -356,7 +442,7 @@ class ProductRecommender:
             print(f"Error fetching product images: {str(e)}")
             return {}
 
-    async def process_query(self, user_id: str, query: str) -> Dict[str, Any]:
+    async def process_query(self, user_id: str, stylist_id: str, query: str) -> Dict[str, Any]:
         """Main function to process user query and return recommendations"""
         try:
             # Get user profile
@@ -368,7 +454,7 @@ class ProductRecommender:
             user_gender = profile.get('gender', None)
             
             # Get initial category-based GPT recommendations
-            category_suggestions = self.get_gpt_recommendations(query, profile)
+            category_suggestions = self.get_gpt_recommendations(query, profile, user_id, stylist_id)
             if not category_suggestions:
                 return {"error": "Failed to generate GPT recommendations"}
             
@@ -384,7 +470,9 @@ class ProductRecommender:
             final_recommendations = self.get_final_recommendations(
                 query, 
                 category_suggestions,
-                category_products
+                category_products,
+                user_id,
+                stylist_id
             )
 
             # Get product images

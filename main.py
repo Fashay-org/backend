@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel, EmailStr, Field, validator
 from typing import List, Dict, Optional, Union
 from datetime import datetime, timedelta
@@ -25,6 +26,8 @@ import json
 import os
 import uuid
 import time
+from enum import Enum
+from decimal import Decimal
 import base64
 import smtplib
 import random
@@ -71,7 +74,38 @@ registration_cache = {}
 forgot_password_cache = {}
 
 
-# Pydantic Models
+
+class CurrencyType(str, Enum):
+    USD = "USD"
+    EUR = "EUR"
+    GBP = "GBP"
+
+class ProductBase(BaseModel):
+    id: uuid.UUID
+    url: str
+    name: str
+    brand: str
+    price: Decimal
+    currency: CurrencyType
+    colors: List[str]
+    image_urls: List[str]
+    category: str
+    additional_notes: Optional[str]
+    gender: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+class HMProduct(ProductBase):
+    sku: str
+
+class AmazonProduct(ProductBase):
+    asin: str
+    sizes: List[str]
+
+class ProductResponse(BaseModel):
+    status: str
+    data: dict
+
 class AuthBase(BaseModel):
     email: EmailStr
     password: str
@@ -234,7 +268,252 @@ app.add_middleware(
 )
 
 
+@app.get("/products", response_model=ProductResponse)
+async def get_all_products(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=40, ge=1, le=100)
+):
+    """Get paginated products from all retailers"""
+    try:
+        # Calculate pagination
+        start = (page - 1) * per_page
+        end = start + per_page - 1
 
+        # Get paginated product references
+        refs_response = supabase.table("product_references")\
+            .select("*", count="exact")\
+            .order('created_at', desc=True)\
+            .range(start, end)\
+            .execute()
+
+        if not refs_response.data:
+            return ProductResponse(
+                status="success",
+                data={
+                    "products": [],
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total_pages": 0,
+                        "total_count": 0,
+                        "has_more": False
+                    }
+                }
+            )
+
+        total_count = refs_response.count
+
+        # Fetch products and combine with reference data
+        all_products = []
+        for ref in refs_response.data:
+            try:
+                # Get product from appropriate retailer table
+                product_response = supabase.table(ref['retailer_table'])\
+                    .select("*")\
+                    .eq("id", ref['product_id'])\
+                    .single()\
+                    .execute()
+
+                if product_response.data:
+                    retailer = ref['retailer_table'].replace('_products', '')
+                    product_data = {
+                        **product_response.data,
+                        'retailer': retailer,
+                        'reference_id': ref['id'],
+                    }
+                    all_products.append(product_data)
+            except Exception as e:
+                print(f"Error fetching product {ref['product_id']}: {str(e)}")
+                continue
+
+        # Calculate pagination info
+        total_pages = (total_count + per_page - 1) // per_page
+        has_more = page < total_pages
+
+        return ProductResponse(
+            status="success",
+            data={
+                "products": all_products,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": total_pages,
+                    "total_count": total_count,
+                    "has_more": has_more
+                }
+            }
+        )
+
+    except Exception as e:
+        print(f"Error in get_all_products: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/products/categories")
+async def get_product_categories():
+    """Get all unique product categories across retailers"""
+    try:
+        # Get categories from both tables
+        categories = set()
+        
+        # Get HM categories
+        hm_response = supabase.table("hm_products").select("category").execute()
+        if hm_response.data:
+            categories.update(item.get("category") for item in hm_response.data if item.get("category"))
+        
+        # Get Amazon categories
+        amazon_response = supabase.table("amazon_products").select("category").execute()
+        if amazon_response.data:
+            categories.update(item.get("category") for item in amazon_response.data if item.get("category"))
+
+        return {
+            "status": "success",
+            "data": sorted(list(categories))
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get categories: {str(e)}")
+
+@app.get("/products/brands")
+async def get_product_brands():
+    """Get all unique brands across retailers"""
+    try:
+        brands = set()
+        
+        # Get HM brands
+        hm_response = supabase.table("hm_products").select("brand").execute()
+        if hm_response.data:
+            brands.update(item.get("brand") for item in hm_response.data if item.get("brand"))
+        
+        # Get Amazon brands
+        amazon_response = supabase.table("amazon_products").select("brand").execute()
+        if amazon_response.data:
+            brands.update(item.get("brand") for item in amazon_response.data if item.get("brand"))
+
+        return {
+            "status": "success",
+            "data": sorted(list(brands))
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get brands: {str(e)}")
+
+@app.get("/products/{product_id}")
+async def get_product_details(product_id: str):
+    """Get detailed information about a specific product"""
+    try:
+        # First get the product reference to determine the retailer
+        ref_response = supabase.table("product_references")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .single()\
+            .execute()
+
+        if not ref_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        retailer_table = ref_response.data["retailer_table"]
+        
+        # Get the product details with the product reference included
+        product_response = supabase.table(retailer_table)\
+            .select("*, product_references!inner(*)")\
+            .eq("id", product_id)\
+            .single()\
+            .execute()
+
+        if not product_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Add retailer information
+        product_data = {
+            **product_response.data,
+            'retailer': 'hm' if retailer_table == 'hm_products' else 'amazon',
+            'product_code': product_response.data.get('sku') if retailer_table == 'hm_products' 
+                          else product_response.data.get('asin')
+        }
+
+        return {
+            "status": "success",
+            "data": product_data
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get product details: {str(e)}")
+
+@app.get("/products/similar/{product_id}")
+async def get_similar_products(product_id: str, limit: int = 5):
+    """Get similar products based on category and price range"""
+    try:
+        # Get the original product details
+        ref_response = supabase.table("product_references")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .single()\
+            .execute()
+
+        if not ref_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        retailer_table = ref_response.data["retailer_table"]
+        
+        # Get original product details
+        product = supabase.table(retailer_table)\
+            .select("*")\
+            .eq("id", product_id)\
+            .single()\
+            .execute()
+
+        if not product.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        price = float(product.data["price"] or 0)
+        price_range = 0.2  # 20% price range
+        min_price = price * (1 - price_range)
+        max_price = price * (1 + price_range)
+
+        similar_products = []
+        
+        # Get similar products from HM
+        hm_similar = supabase.table("hm_products")\
+            .select("*, product_references!inner(*)")\
+            .eq("category", product.data["category"])\
+            .gte("price", min_price)\
+            .lte("price", max_price)\
+            .neq("id", product_id)\
+            .limit(limit)\
+            .execute()
+
+        if hm_similar.data:
+            similar_products.extend([
+                {**item, 'retailer': 'hm', 'product_code': item.get('sku')}
+                for item in hm_similar.data
+            ])
+
+        # Get similar products from Amazon
+        amazon_similar = supabase.table("amazon_products")\
+            .select("*, product_references!inner(*)")\
+            .eq("category", product.data["category"])\
+            .gte("price", min_price)\
+            .lte("price", max_price)\
+            .neq("id", product_id)\
+            .limit(limit)\
+            .execute()
+
+        if amazon_similar.data:
+            similar_products.extend([
+                {**item, 'retailer': 'amazon', 'product_code': item.get('asin')}
+                for item in amazon_similar.data
+            ])
+
+        # Sort by price similarity and limit results
+        similar_products.sort(key=lambda x: abs(float(x.get("price", 0) or 0) - price))
+        similar_products = similar_products[:limit]
+
+        return {
+            "status": "success",
+            "data": similar_products
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get similar products: {str(e)}")
 # Update route handlers
 @app.get("/view")
 async def get_view_page(request: Request, email: str):
@@ -472,7 +751,7 @@ async def handle_chat(data: ChatRequest):
         parsed_result = json.loads(result)
         text = parsed_result.get("text", "No response text found.")
 
-        print(parsed_result, "parsed_result")
+        # print(parsed_result, "parsed_result")
         # Get wardrobe images
         # Get wardrobe images
         images = []
@@ -503,7 +782,7 @@ async def handle_chat(data: ChatRequest):
                         token_name=matching_item["token_name"]
                     ))
 
-        print(images, "images")
+        # print(images, "images")
         # Process recommendations
         recommendations = None
         if "recommendations" in parsed_result:

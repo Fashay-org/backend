@@ -57,8 +57,14 @@ class FashionAssistant:
                 I specialize in creating flattering looks that make people feel confident and comfortable."""
             }
             
-            # Initialize the product recommender
-            self.product_recommender = ProductRecommender()
+            # Initialize the product recommender with shared thread management
+            self.product_recommender = ProductRecommender(
+                thread_manager={
+                    'get_thread': self._get_or_create_thread,
+                    'user_threads': self.user_threads,
+                    'last_interaction': self.last_interaction
+                }
+            )
             
             # Initialize the graph
             self.workflow = StateGraph(State)
@@ -95,7 +101,7 @@ class FashionAssistant:
             )
             
             self.workflow.add_edge("generate_wardrobe_response", END)  # Direct path to END for wardrobe-only response
-            
+            self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY2")) 
             # Compile the graph
             self.graph = self.workflow.compile()
             self.assistant = self._create_assistant()
@@ -282,7 +288,6 @@ class FashionAssistant:
         """Determine if external product recommendations are needed"""
         try:
             # First check if wardrobe is empty
-            # print("wardrobe data printing", state["wardrobe_data"])
             if not state["wardrobe_data"]:
                 return {
                     **state,
@@ -294,6 +299,8 @@ class FashionAssistant:
                         "categories": []
                     }
                 }
+            # Get or create thread
+            thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
 
             system_prompt = """You are a shopping intent analyzer. Determine if the user's query indicates 
             interest in purchasing or shopping for new items. Consider both explicit mentions and implicit intent.
@@ -315,26 +322,38 @@ class FashionAssistant:
             Analyze if they need new items or can be styled with existing wardrobe.
             If the wardrobe lacks essential items to create a complete outfit, indicate that shopping is needed."""
 
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_context}
-                ],
-                temperature=0.1,
-                response_format={ "type": "json_object" }
+            # Create message in thread
+            message = self.client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=[{"type": "text", "text": system_prompt + "\n\n" + user_context}]
             )
-
-            analysis = json.loads(response.choices[0].message.content)
+            
+            # Create and wait for run
+            run = self.client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=self.assistant.id
+            )
+            
+            while True:
+                run_status = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run.id
+                )
+                if run_status.status == "completed":
+                    break
+                await asyncio.sleep(1)
+            
+            messages = self.client.beta.threads.messages.list(thread_id=thread_id)
+            analysis = json.loads(messages.data[0].content[0].text.value)
             needs_recommendations = analysis.get("needs_shopping", False)
 
-            # If wardrobe response exists but has no items referenced, also trigger recommendations
+            # If wardrobe response exists but has no items referenced, trigger recommendations
             if state.get("wardrobe_response") and not state["wardrobe_response"].get("value"):
                 needs_recommendations = True
                 analysis["needs_shopping"] = True
                 analysis["reasoning"] += " (No suitable items found in wardrobe)"
             
-            print("shopping analysis printing", needs_recommendations, analysis)
             return {
                 **state,
                 "needs_recommendations": needs_recommendations,
@@ -478,6 +497,7 @@ class FashionAssistant:
 
             recommendations = await self.product_recommender.process_query(
                 user_id=state["unique_id"],
+                stylist_id=state["stylist_id"],
                 query=enhanced_query
             )
             
