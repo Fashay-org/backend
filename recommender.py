@@ -153,23 +153,19 @@ class ProductRecommender:
         try:
             # Get thread key and shared context
             thread_key = f"{user_id}_{stylist_id}"
+            # Initialize empty list if needed
             if thread_key not in self.conversation_context:
-                self.conversation_context[thread_key] = {
-                    'last_query': None,
-                    'occasion': None,
-                    'style_preferences': None,
-                    'last_recommendations': None
-                }
-            context = self.conversation_context[thread_key]
+                self.conversation_context[thread_key] = []
+                
+            conversation_messages = self.conversation_context[thread_key]
+
 
             # Create context-aware prompt
             system_prompt = """You are a product recommendation assistant specializing in fashion products. 
 
             Consider the following context:
-            Previous occasion: {last_occasion}
-            Previous query: {last_query}
-            Current query: {query}
-            Previous style preferences: {style_preferences}
+            Previous Conversation:
+            {prev_conversation}
             
             User Profile:
             - Gender: {gender}
@@ -204,11 +200,9 @@ class ProductRecommender:
             - Focus on one clear item per category
             - Ensure descriptions are detailed enough for matching
             - Consider gender appropriateness when specified
-            - Include fit details where relevant""".format(
-                last_occasion=context.get('occasion'),
-                last_query=context.get('last_query'),
+            - Include color, material, and style details""".format(
+                prev_conversation=chr(10).join(conversation_messages) if conversation_messages else "No previous conversation",
                 query=query,
-                style_preferences=', '.join(context.get('style_preferences', [])) if context.get('style_preferences') else 'None',
                 gender=profile.get('gender', 'Not specified'),
                 styles=', '.join(profile.get('favorite_styles', [])),
                 colors=', '.join(profile.get('favorite_colors', [])),
@@ -244,10 +238,8 @@ class ProductRecommender:
             
             messages = self.client.beta.threads.messages.list(thread_id=thread_id)
             recommendations = json.loads(messages.data[0].content[0].text.value)
-            
-            # No need to update context here as it's managed by FashionAssistant
-            # Just save the recommendations
-            context['last_recommendations'] = recommendations
+            self.conversation_context[thread_key].append(f"System: {messages.data[0].content[0].text.value}")
+
 
             return recommendations
             

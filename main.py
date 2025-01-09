@@ -739,7 +739,7 @@ async def handle_chat(data: ChatRequest):
         for record in image_data.data
     ]
 
-    try:
+    if 1:
         result = await async_generate_with_retry(
             query=data.input_text,
             unique_id=unique_id,
@@ -747,12 +747,11 @@ async def handle_chat(data: ChatRequest):
             image_id=data.token_name,
             wardrobe_data=wardrobe_data
         )
-        
+        # print("Raw result:", result)  # Add this to see the raw response
         parsed_result = json.loads(result)
         text = parsed_result.get("text", "No response text found.")
 
-        # print(parsed_result, "parsed_result")
-        # Get wardrobe images
+        print(parsed_result, "parsed_result")
         # Get wardrobe images
         images = []
         value_items = parsed_result.get("value", [])
@@ -783,7 +782,6 @@ async def handle_chat(data: ChatRequest):
                     ))
 
         # print(images, "images")
-        # Process recommendations
         recommendations = None
         if "recommendations" in parsed_result:
             recs = parsed_result["recommendations"]
@@ -840,13 +838,13 @@ async def handle_chat(data: ChatRequest):
             shopping_analysis=shopping_analysis
         )
     
-    except json.JSONDecodeError as e:
-        print(f"JSON parse error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to parse response: {str(e)}")
-    except Exception as e:
-        print(f"Error in handle_chat: {str(e)}")
-        print(f"Result was: {result}")  # Log the raw result for debugging
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+    # except json.JSONDecodeError as e:
+    #     print(f"JSON parse error: {str(e)}")
+    #     raise HTTPException(status_code=500, detail=f"Failed to parse response: {str(e)}")
+    # except Exception as e:
+    #     print(f"Error in handle_chat: {str(e)}")
+    #     # print(f"Result was: {result}")  # Log the raw result for debugging
+    #     raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
 class ImageUploadRequest(BaseModel):
     email: str
     password: str

@@ -74,6 +74,7 @@ class FashionAssistant:
             
             # Add nodes
             self.workflow.add_node("process_input", self.process_user_input)
+            self.workflow.add_node("handle_question", self.handle_question)  # New node
             self.workflow.add_node("check_recommendation_need", self.check_recommendation_need)
             self.workflow.add_node("generate_wardrobe_response", self.generate_wardrobe_response)
             self.workflow.add_node("get_product_recommendations", self.get_product_recommendations)
@@ -81,15 +82,27 @@ class FashionAssistant:
             
             # Add edges
             self.workflow.add_edge(START, "process_input")
-            self.workflow.add_edge("process_input", "check_recommendation_need")
-            
+            # self.workflow.add_edge("process_input", "check_recommendation_need")
+            # Add conditional edges from process_input based on question need
+            self.workflow.add_conditional_edges(
+                "process_input",
+                self.should_ask_question,  # New condition
+                {
+                    True: "handle_question",  # If we need more info, go to question handler
+                    False: "check_recommendation_need"  # Otherwise continue normal flow
+                }
+            )
+
+            # Add edge from question handler to END
+            self.workflow.add_edge("handle_question", END)
+
             # Add conditional edges based on shopping need
             self.workflow.add_conditional_edges(
                 "check_recommendation_need",
                 self.should_get_recommendations,
                 {
-                    True: "get_product_recommendations",  # If shopping needed, get recommendations
-                    False: "generate_wardrobe_response"   # If no shopping needed, just wardrobe styling
+                    True: "get_product_recommendations",
+                    False: "generate_wardrobe_response"
                 }
             )
             
@@ -110,35 +123,141 @@ class FashionAssistant:
             self.assistant = self._create_assistant()
 
     def _create_assistant(self):
-            """Create the fashion stylist assistant with updated instructions"""
-            stylist_personality = self.stylist_personalities.get(
-                self.current_stylist_id,
-                "I am your personal fashion stylist, focused on helping you create stylish and confident looks."
-            )
+        """Create the fashion stylist assistant with updated instructions"""
+        stylist_personality = self.stylist_personalities.get(
+            self.current_stylist_id,
+            "I am your personal fashion stylist, focused on helping you create stylish and confident looks."
+        )
 
+        instructions = f"""You are an expert fashion stylist assistant named {self.current_stylist_id.capitalize()}.\n\n{stylist_personality}\n\n"""
+
+        try:
             assistant = client.beta.assistants.create(
                 name="Fashion Stylist",
-                instructions=f"""You are an expert fashion stylist assistant named {self.current_stylist_id.capitalize()}. 
-                
-                {stylist_personality}
-                
-                IMPORTANT: You MUST respond with ONLY a JSON string in this exact format:
-                {{
-                    "text": "<your complete styling advice here>",
-                    "value": ["token_name1", "token_name2"]
-                }}
+                instructions=instructions + r"""
+                You help users with outfit recommendations using chain of thought reasoning. Follow this process:
 
-                The text field should contain your detailed styling advice and recommendations.
-                The value array MUST contain the token_names/IDs of the wardrobe items you referenced in your advice.
-                Use empty array [] if no specific items are referenced.
+                THOUGHT PROCESS:
+                1. Analyze what information you have:
+                - Occasion/event details
+                - Style preferences
+                - Wardrobe items
+                - Target item (if any)
+                
+                2. If information is missing, respond with:
+                {
+                    "text": "Your question to gather more information",
+                    "value": [],
+                    "needs_info": true,
+                    "context": {
+                        "understood": ["what you know"],
+                        "missing": ["what you need to know"],
+                        "question": "your specific question"
+                    }
+                }
 
-                DO NOT include any other text or explanations outside this JSON structure.
-                ENSURE your response can be parsed as valid JSON.""",
+                3. If you have enough information, respond with:
+                {
+                    "text": "Your styling advice and explanation",
+                    "value": [
+                        {
+                            "category": "item category (shirt/pants/etc)",
+                            "product_id": "item identifier",
+                            "styling_tips": ["tip 1", "tip 2"]
+                        }
+                    ],
+                    "recommendations": {
+                        "category_suggestions": {
+                            "occasion": "event description",
+                            "shirt": "detailed shirt description",
+                            "pants": "detailed pants description",
+                            "shoes": "detailed shoes description",
+                            "accessories": "detailed accessories description"
+                        },
+                        "products": [
+                            // Product details will be filled by the system
+                        ]
+                    }
+                }
+
+                Example - When Gathering Information:
+                User: "I need an outfit"
+                Assistant's Thought Process:
+                1. Very general request, missing critical details
+                2. Need occasion and style preferences
+                3. Occasion is most important for formality level
+                Response: {
+                    "text": "I'll help you create the perfect outfit. First, what occasion are you dressing for?",
+                    "value": [],
+                    "needs_info": true,
+                    "context": {
+                        "understood": ["needs outfit recommendation"],
+                        "missing": ["occasion", "style preferences"],
+                        "question": "What occasion are you dressing for?"
+                    }
+                }
+
+                Example - When Providing Recommendations:
+                User: "I need an outfit for a dinner date at a nice restaurant"
+                Assistant's Thought Process:
+                1. Have key information:
+                - Occasion: Formal dinner date
+                - Setting: Upscale restaurant
+                2. Can provide complete recommendation
+                Response: {
+                    "text": "I've put together a sophisticated dinner date look...",
+                    "value": [
+                        {
+                            "category": "category name",
+                            "product_id": "product id will be here",
+                            "styling_tips": ["suggestion tip 1", "suggestion tip 2"]
+                        }
+                    ],
+                    "recommendations": {
+                        "category_suggestions": {
+                            "categroy 1": "suggestion for category 1",
+                            "category 2": "suggestion for category 2",
+                        }
+                    }
+                }""",
                 model="gpt-4o-mini",
-                tools=[]
+                tools=[],
             )
             return assistant
+        except Exception as e:
+            print(f"Error creating assistant: {str(e)}")
+            raise
 
+    def should_ask_question(self, state: State) -> bool:
+        """Check if we need to ask for more information"""
+        try:
+            if state.get("response"):
+                response = json.loads(state.get("response"))
+                return response.get("needs_info", False)
+            return False
+        except:
+            return False
+
+    @traceable
+    async def handle_question(self, state: State) -> Dict[str, Any]:
+        """Handle cases where we need to ask for more information"""
+        try:
+            # Just return the question response
+            return {
+                "messages": state.get("messages", []),
+                "response": state.get("response")  # This contains the question format
+            }
+        except Exception as e:
+            print(f"Error in handle_question: {str(e)}")
+            error_response = {
+                "text": "I apologize, but I encountered an error processing your request.",
+                "value": [],
+                "needs_info": False
+            }
+            return {
+                "messages": state.get("messages", []),
+                "response": json.dumps(error_response)
+            }
     def _get_thread_key(self, unique_id, stylist_id):
         return f"{unique_id}_{stylist_id}"
 
@@ -158,14 +277,9 @@ class FashionAssistant:
         thread_key = self._get_thread_key(unique_id, stylist_id)
         current_time = time.time()
         
-        # Initialize or get context
+        # Initialize context with only messages
         if thread_key not in self.conversation_context:
-            self.conversation_context[thread_key] = {
-                'last_query': None,
-                'occasion': None,
-                'style_preferences': None,
-                'last_recommendations': None
-            }
+            self.conversation_context[thread_key] = []  # Just a simple list for messages
         
         if thread_key in self.user_threads:
             self.last_interaction[thread_key] = current_time
@@ -185,7 +299,9 @@ class FashionAssistant:
             del self.user_threads[thread_key]
         if thread_key in self.last_interaction:
             del self.last_interaction[thread_key]
-        
+        if thread_key in self.conversation_context:
+            self.conversation_context[thread_key] = []  # Reset to empty list
+                
         thread = client.beta.threads.create()
         self.user_threads[thread_key] = thread.id
         self.last_interaction[thread_key] = time.time()
@@ -256,65 +372,38 @@ class FashionAssistant:
             }
     @traceable
     async def process_user_input(self, state: State) -> Dict[str, Any]:
-        """Process the initial user input and maintain context while handling wardrobe items"""
-        # Get or initialize context
+        thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
         thread_key = self._get_thread_key(state["unique_id"], state["stylist_id"])
         
+        # Initialize if needed
         if thread_key not in self.conversation_context:
-            self.conversation_context[thread_key] = {
-                'last_query': None,
-                'occasion': None,
-                'style_preferences': None,
-                'last_recommendations': None
-            }
-        context = self.conversation_context[thread_key]
+            self.conversation_context[thread_key] = []
+        # conversation_messages = self.conversation_context[thread_key]
+    
+        # Create the system and user message
+        context_message = f"""
+        Previous Conversation:
+        {chr(10).join(self.conversation_context[thread_key]) if self.conversation_context[thread_key] else "No previous conversation"}
 
-        # Get stylist personality context
-        stylist_context = self.stylist_personalities.get(
-            state["stylist_id"].lower(),
-            "I am your personal fashion stylist, focused on helping you create stylish and confident looks."
-        )
+        Current User Query: {state['user_query']}
 
-        # Process wardrobe items
-        wardrobe_items = "\n".join(
-            f"- {item['caption']} (ID: {item['token_name']})" 
-            for item in state["wardrobe_data"]
-        )
+        Follow your chain of thought process and respond in EXACTLY this format:
+        {{
+            "text": "your message or question",
+            "value": [],
+            "needs_info": true/false,
+            "context": {{
+                "understood": ["what you know"],
+                "missing": ["what you need"],
+                "question": "your question"
+            }}
+        }}
+        """
         
-        # Handle target item
-        if state["image_id"] and state["image_id"] != "general_chat":
-            target_item = next(
-                (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
-                None
-            )
-            target_context = f"""Target Item: {target_item['caption'] if target_item else 'Unknown item'} (ID: {state['image_id']})
-            Please provide recommendations that complement this target item."""
-        else:
-            target_context = "No specific target item. Please provide recommendations based on the available wardrobe items."
-
-        # Extract context from the query
-        thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
         message = self.client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=[{"type": "text", "text": f"""
-            Analyze this query and extract:
-            1. Occasion/event (if mentioned)
-            2. Style preferences
-            3. Any specific requirements
-
-            Previous context:
-            - Previous occasion: {context['occasion']}
-            - Previous query: {context['last_query']}
-            
-            Current query: {state['user_query']}
-            
-            Return ONLY a JSON with this structure:
-            {{
-                "occasion": "extracted occasion or previous occasion if none mentioned",
-                "style_preferences": ["list", "of", "preferences"],
-                "specific_requirements": ["list", "of", "requirements"]
-            }}"""}]
+            content=[{"type": "text", "text": context_message}]
         )
         
         run = self.client.beta.threads.runs.create(
@@ -332,35 +421,45 @@ class FashionAssistant:
             await asyncio.sleep(1)
         
         messages = self.client.beta.threads.messages.list(thread_id=thread_id)
-        analysis = json.loads(messages.data[0].content[0].text.value)
+        response_text = messages.data[0].content[0].text.value
         
-        # Update context
-        context['last_query'] = state['user_query']
-        context['occasion'] = analysis['occasion']
-        context['style_preferences'] = analysis['style_preferences']
 
-        # Combine all context into enhanced query
-        enhanced_query = f"""STYLIST CONTEXT:
-        {stylist_context}
-
-        CONVERSATION CONTEXT:
-        Occasion: {context['occasion']}
-        Style Preferences: {', '.join(context['style_preferences'])}
-        Previous Query: {context['last_query']}
-
-        SITUATION CONTEXT:
-        {target_context}
-
-        Available Wardrobe Items:
-        {wardrobe_items}
-
-        Current User Query: {state['user_query']}
-        Specific Requirements: {', '.join(analysis['specific_requirements'])}"""
-        
-        return {
-            "messages": state.get("messages", []) + [enhanced_query],
-            "user_query": enhanced_query
-        }
+        print(response_text, "response_text printingggggggggggggggggggggggggggggg")
+        try:
+            json_start = response_text.find('{"text":')
+            if json_start == -1:
+                json_start = response_text.find('{')
+                
+            json_text = response_text[json_start:]
+            response = json.loads(json_text)
+            
+            # Store the conversation flow
+            self.conversation_context[thread_key].append(f"User: {state['user_query']}")
+            self.conversation_context[thread_key].append(f"Assistant: {response['text']}")
+            
+            # Keep only last N messages for context
+            if len(self.conversation_context[thread_key]) > self.max_history * 2:  # *2 because each turn has user + assistant
+                self.conversation_context[thread_key] = self.conversation_context[thread_key][-self.max_history * 2:]
+            
+            return {
+                "messages": state.get("messages", []),
+                "response": json.dumps(response),
+                "user_query": state['user_query']
+            }
+                    
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse response: {response_text}")
+            print(f"JSON error: {str(e)}")
+            error_response = {
+                "text": "I apologize, but I encountered an error processing your request.",
+                "value": [],
+                "needs_info": False
+            }
+            return {
+                "messages": state.get("messages", []),
+                "response": json.dumps(error_response),
+                "user_query": state['user_query']
+            }
 
     @traceable
     async def check_recommendation_need(self, state: State) -> Dict[str, Any]:

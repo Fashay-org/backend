@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        .node {
+            cursor: pointer;
+        }
+        .node circle {
+            fill: #fff;
+            stroke: steelblue;
+            stroke-width: 2px;
+        }
+        .node text {
+            font: 12px sans-serif;
+        }
+        .link {
+            fill: none;
+            stroke: #ccc;
+            stroke-width: 1.5px;
+        }
+        .tooltip {
+            position: absolute;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+</head>
+<body>
+    <div id="tree-container"></div>
+    <script>
+        const treeData = {
+            name: "Fashion System",
+            description: "Main entry point for the fashion recommendation system",
+            children: [
+                {
+                    name: "FashionAssistant",
+                    description: "Handles styling advice and wardrobe management (RAG_agents.py)",
+                    children: [
+                        {
+                            name: "_create_assistant",
+                            description: "Creates Fashion Stylist Assistant with GPT-4\nReturns assistant.id for use in processing",
+                            children: [
+                                {
+                                    name: "process_user_input",
+                                    description: "Processes initial user query using assistant.id\nDetermines if more information is needed",
+                                    children: [
+                                        {
+                                            name: "check_recommendation_need",
+                                            description: "Analyzes if external product recommendations are needed"
+                                        }
+                                    ]
+                                },
+                                {
+                                    name: "generate_wardrobe_response",
+                                    description: "Generates styling advice using existing wardrobe items\nUses assistant.id for GPT calls"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    name: "ProductRecommender",
+                    description: "Handles product recommendations and matching (recommender.py)",
+                    children: [
+                        {
+                            name: "_create_assistant",
+                            description: "Creates Product Recommender Assistant with GPT-4\nReturns assistant.id for recommendations",
+                            children: [
+                                {
+                                    name: "get_gpt_recommendations",
+                                    description: "Generates category-based recommendations using assistant.id",
+                                    children: [
+                                        {
+                                            name: "get_category_recommendations",
+                                            description: "Matches recommendations with actual products"
+                                        }
+                                    ]
+                                },
+                                {
+                                    name: "get_final_recommendations",
+                                    description: "Creates final styled recommendations\nCombines GPT advice with product details"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        // Set up the dimensions and margins
+        const margin = {top: 20, right: 120, bottom: 20, left: 120};
+        const width = 960 - margin.right - margin.left;
+        const height = 800 - margin.top - margin.bottom;
+
+        // Create the SVG container
+        const svg = d3.select("#tree-container")
+            .append("svg")
+            .attr("width", width + margin.right + margin.left)
+            .attr("height", height + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // Create the tree layout
+        const tree = d3.tree().size([height, width]);
+
+        // Create the root node
+        const root = d3.hierarchy(treeData);
+
+        // Assign the data to the tree layout
+        const treeData2 = tree(root);
+
+        // Create the links
+        const link = svg.selectAll(".link")
+            .data(root.links())
+            .enter().append("path")
+            .attr("class", "link")
+            .attr("d", d3.linkHorizontal()
+                .x(d => d.y)
+                .y(d => d.x));
+
+        // Create the nodes
+        const node = svg.selectAll(".node")
+            .data(root.descendants())
+            .enter().append("g")
+            .attr("class", "node")
+            .attr("transform", d => `translate(${d.y},${d.x})`);
+
+        // Add circles to the nodes
+        node.append("circle")
+            .attr("r", 6);
+
+        // Add labels to the nodes
+        node.append("text")
+            .attr("dy", ".35em")
+            .attr("x", d => d.children ? -10 : 10)
+            .style("text-anchor", d => d.children ? "end" : "start")
+            .text(d => d.data.name);
+
+        // Create tooltip
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+
+        // Add tooltip functionality
+        node.on("mouseover", function(event, d) {
+            tooltip.transition()
+                .duration(200)
+                .style("opacity", .9);
+            tooltip.html(d.data.description)
+                .style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY - 28) + "px");
+        })
+        .on("mouseout", function(d) {
+            tooltip.transition()
+                .duration(500)
+                .style("opacity", 0);
+        });
+
+        // Add click functionality
+        node.on("click", function(event, d) {
+            if (d.children) {
+                d._children = d.children;
+                d.children = null;
+            } else {
+                d.children = d._children;
+                d._children = null;
+            }
+            update(d);
+        });
+
+        // Update function for the tree
+        function update(source) {
+            const duration = 750;
+
+            const nodes = root.descendants();
+            const links = root.links();
+
+            // Update nodes
+            const node = svg.selectAll(".node")
+                .data(nodes, d => d.id || (d.id = ++i));
+
+            // Update links
+            const link = svg.selectAll(".link")
+                .data(links, d => d.target.id);
+
+            // Transition nodes to new positions
+            const nodeUpdate = node.transition()
+                .duration(duration)
+                .attr("transform", d => `translate(${d.y},${d.x})`);
+
+            // Transition links to new positions
+            link.transition()
+                .duration(duration)
+                .attr("d", d3.linkHorizontal()
+                    .x(d => d.y)
+                    .y(d => d.x));
+        }
+    </script>
+</body>
+</html>
