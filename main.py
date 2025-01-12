@@ -751,7 +751,7 @@ async def handle_chat(data: ChatRequest):
         parsed_result = json.loads(result)
         text = parsed_result.get("text", "No response text found.")
 
-        print(parsed_result, "parsed_result")
+        # print(parsed_result, "parsed_result")
         # Get wardrobe images
         images = []
         value_items = parsed_result.get("value", [])

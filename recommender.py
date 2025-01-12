@@ -187,11 +187,9 @@ class ProductRecommender:
             
             Return ONLY a JSON with this exact structure:
             {{
-                "occasion": "current occasion or previous if not specified",
-                "shirt": "detailed description of recommended shirt",
-                "pants": "detailed description of recommended pants",
-                "shoes": "detailed description of recommended shoes",
-                "accessories": "detailed description of recommended accessories"
+                "category 1": "detailed description of recommended category 1",
+                "category 2": "detailed description of recommended category 2",
+                "category 3": "detailed description of recommended category 3",
             }}
             
             Guidelines:

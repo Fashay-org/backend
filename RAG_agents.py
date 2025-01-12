@@ -39,6 +39,7 @@ class State(TypedDict):
     product_recommendations: Optional[Dict[str, Any]]
     shopping_analysis: Optional[Dict[str, Any]]
     wardrobe_response: Optional[Dict[str, Any]]
+    response_type: str
 
 class FashionAssistant:
     def __init__(self, stylist_id="reginald"):
@@ -46,7 +47,7 @@ class FashionAssistant:
             self.user_threads = {}
             self.conversation_context = {}
             self.last_interaction = {}
-            self.max_history = 10
+            self.max_history = 25
             self.stylist_personalities = {
                 "reginald": """I am Reginald, a men's fashion expert with a keen eye for sophisticated yet practical styling. 
                 I specialize in creating versatile looks that combine classic elements with modern trends.""",
@@ -108,13 +109,13 @@ class FashionAssistant:
             
             # For product recommendation path
             self.workflow.add_edge("get_product_recommendations", "format_product_response")
-            
+            self.workflow.add_edge("format_product_response", END)
             # Add final edges
-            self.workflow.add_conditional_edges(
-                "format_product_response",
-                self.should_end,
-                [END]
-            )
+            # self.workflow.add_conditional_edges(
+            #     "format_product_response",
+            #     self.should_end,
+            #     [END]
+            # )
             
             self.workflow.add_edge("generate_wardrobe_response", END)  # Direct path to END for wardrobe-only response
             self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY2")) 
@@ -130,110 +131,158 @@ class FashionAssistant:
         )
 
         instructions = f"""You are an expert fashion stylist assistant named {self.current_stylist_id.capitalize()}.\n\n{stylist_personality}\n\n"""
-
         try:
             assistant = client.beta.assistants.create(
                 name="Fashion Stylist",
                 instructions=instructions + r"""
-                You help users with outfit recommendations using chain of thought reasoning. Follow this process:
+                You provide thorough fashion recommendations through systematic self-questioning reasoning. Follow this process:
 
                 THOUGHT PROCESS:
-                1. Analyze what information you have:
-                - Occasion/event details
-                - Style preferences
-                - Wardrobe items
-                - Target item (if any)
+                1. Begin with foundational analysis:
+                <contemplator>
+                - What is the core request?
+                - What style information do we already have?
+                - What critical details are missing?
+                </contemplator>
                 
-                2. If information is missing, respond with:
+                2. Style Profile Building:
+                a. Basic Style (Question each element):
+                - Desired style words
+                - Color preferences
+                - Style inspiration
+                - Key pieces
+                - Boundaries
+
+                3. Response Types:
+                You must respond with one of three modes using the needs_info field:
+                - "ask": When you need more information from the user
+                - "speak": When you just need to communicate something without recommendations
+                - "suggest": When you're ready to provide product suggestions
+
+                4. Response Format:
+                For "ask" mode (when you need to know about the user style profile, ask only one question at a time):
                 {
-                    "text": "Your question to gather more information",
-                    "value": [],
-                    "needs_info": true,
+                    "text": "Your question to the user must be present here", // ask only 1 question at a time
+                    "value": [], // Referenced items
+                    "needs_info": "ask",
                     "context": {
                         "understood": ["what you know"],
-                        "missing": ["what you need to know"],
-                        "question": "your specific question"
+                        "missing": ["what you need"],
+                        "question": "your question if asking"
                     }
                 }
-
-                3. If you have enough information, respond with:
+                For "speak" mode (include all explanations in the text field):
                 {
-                    "text": "Your styling advice and explanation",
+                    "text":  "Here is your message to the user, explain everything in detail. No need to ask questions or give recommendations.",
+                    "value": [], // Referenced items
+                    "needs_info": "speak",
+                    "context": {
+                        "understood": ["what you know"],
+                        "missing": [],
+                        "question": "" 
+                    },
+                }
+
+                For "suggest" mode (when you are recommending something or giving suggestions):
+                {
+                    "text": "Your styling advice and explanation", 
                     "value": [
-                        {
-                            "category": "item category (shirt/pants/etc)",
-                            "product_id": "item identifier",
-                            "styling_tips": ["tip 1", "tip 2"]
-                        }
-                    ],
-                    "recommendations": {
+                    token name 1,
+                    token name 2
+                    ], //for recommendations from within the wardrobe.
+                    "needs_info": "suggest",
+                    "context": {
+                        "understood": ["what you know"],
+                        "missing": ["what you need"],
+                        "question": "your question if asking" // Empty string if not asking
+                    },
+                    "recommendations": {  // Only include when needs_info = "suggest"
                         "category_suggestions": {
-                            "occasion": "event description",
-                            "shirt": "detailed shirt description",
-                            "pants": "detailed pants description",
-                            "shoes": "detailed shoes description",
-                            "accessories": "detailed accessories description"
-                        },
+                            "category 1": "detailed category 1 description",
+                            "category 2": "detailed category 2 description",
+                            "category 3": "detailed category 3 description",
+                            "category 4": "detailed category 4 description",
+                            "category 5": "detailed category 5 description",
+                        },  
                         "products": [
                             // Product details will be filled by the system
                         ]
+                        }
                     }
                 }
 
-                Example - When Gathering Information:
-                User: "I need an outfit"
-                Assistant's Thought Process:
-                1. Very general request, missing critical details
-                2. Need occasion and style preferences
-                3. Occasion is most important for formality level
-                Response: {
-                    "text": "I'll help you create the perfect outfit. First, what occasion are you dressing for?",
+                Examples:
+
+                1. Asking for Information:
+                {
+                    "text": "Questions that help understand user style preferences like what are your stylistic inspirations?", //don't use the same question
                     "value": [],
-                    "needs_info": true,
+                    "needs_info": "ask",
                     "context": {
                         "understood": ["needs outfit recommendation"],
                         "missing": ["occasion", "style preferences"],
-                        "question": "What occasion are you dressing for?"
+                        "question": "what are your stylistic inspirations?"
                     }
                 }
 
-                Example - When Providing Recommendations:
-                User: "I need an outfit for a dinner date at a nice restaurant"
-                Assistant's Thought Process:
-                1. Have key information:
-                - Occasion: Formal dinner date
-                - Setting: Upscale restaurant
-                2. Can provide complete recommendation
-                Response: {
-                    "text": "I've put together a sophisticated dinner date look...",
+                2. Simple Communication:
+                {
+                    "text": "The reason for choosing the white blouse is that it is simple and elegant.",
+                    "value": [],
+                    "needs_info": "speak",
+                    "context": {
+                        "understood": ["wants casual outfit"],
+                        "missing": [],
+                        "question": ""
+                    }
+                }
+
+                3. Providing Recommendations:
+                {
+                    "text": "Here's a sophisticated outfit for your business meeting",
                     "value": [
-                        {
-                            "category": "category name",
-                            "product_id": "product id will be here",
-                            "styling_tips": ["suggestion tip 1", "suggestion tip 2"]
-                        }
+                    token name 1,
+                    token name 2
                     ],
+                    "needs_info": "suggest",
+                    "context": {
+                        "understood": ["business meeting", "formal setting"],
+                        "missing": [],
+                        "question": ""
+                    },
                     "recommendations": {
                         "category_suggestions": {
-                            "categroy 1": "suggestion for category 1",
+                            "category 1": "suggestion for category 1",
                             "category 2": "suggestion for category 2",
                         }
                     }
-                }""",
+                }
+                """,
                 model="gpt-4o-mini",
                 tools=[],
             )
             return assistant
         except Exception as e:
             print(f"Error creating assistant: {str(e)}")
-            raise
+            error_response = {
+                "text": f"I apologize, but I encountered an error initializing the fashion assistant: {str(e)}",
+                "value": [],
+                "needs_info": "speak",  # Changed from False
+                "context": {
+                    "error": str(e),
+                    "understood": ["assistant creation attempted"],
+                    "missing": [],
+                    "question": ""
+                }
+            }
+            raise Exception(json.dumps(error_response))
 
     def should_ask_question(self, state: State) -> bool:
         """Check if we need to ask for more information"""
         try:
             if state.get("response"):
                 response = json.loads(state.get("response"))
-                return response.get("needs_info", False)
+                return response.get("needs_info") == "ask"
             return False
         except:
             return False
@@ -311,60 +360,99 @@ class FashionAssistant:
     async def format_product_response(self, state: State) -> Dict[str, Any]:
         """Format the product recommendations response"""
         try:
-            recommendations = state.get("product_recommendations", {})
-            stylist_name = state["stylist_id"].capitalize()
+            response = json.loads(state.get("response", "{}"))
+            recommendations = state.get("product_recommendations", {}) or {}
             
-            # Extract data from recommendations
-            category_suggestions = recommendations.get("category_suggestions", {})
-            final_recommendation = json.loads(recommendations.get("final_recommendation", "{}"))
-            products = recommendations.get("products", [])
-            
-            # Create formatted response
-            formatted_response = {
-                "text": final_recommendation.get("query_fit", f"Here are {stylist_name}'s recommendations for your outfit:"),
-                "value": final_recommendation.get("items", []),
-                "recommendations": {
-                    "category_suggestions": category_suggestions,
-                    "products": []
+            # Handle speak/ask modes
+            if response.get("needs_info") in ["speak", "ask"]:
+                return {
+                    "messages": state["messages"],
+                    "response": json.dumps({
+                        "text": response.get("text", ""),
+                        "value": response.get("value", []),  # Preserve value array for wardrobe items
+                        "needs_info": response.get("needs_info"),
+                        "context": response.get("context", {})
+                    })
                 }
-            }
             
-            # Format product details
-            for product in products:
-                formatted_product = {
-                    "category": product["category"],
-                    "product_id": product["product_id"],
-                    "product_text": product["product_text"],
-                    "retailer": product["retailer"],
-                    "similarity_score": product["similarity_score"],
-                    "image_urls": product.get("image_urls", []),
-                    "url": product.get("url", ""),  # Product URL
-                    "price": product.get("price", ""),  # Product price
-                    "brand": product.get("brand", ""),  # Product brand
-                    "suggestion": category_suggestions.get(product["category"], ""),
-                    "gender": product.get("gender", "")
+            # Handle suggest mode
+            if response.get("needs_info") == "suggest":
+                # Get category suggestions
+                category_suggestions = {}
+                if isinstance(recommendations, dict):
+                    category_suggestions = recommendations.get("category_suggestions", {})
+                if not category_suggestions and response.get("recommendations"):
+                    category_suggestions = response["recommendations"].get("category_suggestions", {})
+                
+                # Get value items (wardrobe references) from response
+                value_items = []
+                if response.get("value"):
+                    for item in response["value"]:
+                        if isinstance(item, dict):
+                            # Handle dictionary format
+                            value_items.append({
+                                "category": item.get("category", ""),
+                                "product_id": item.get("product_id", ""),
+                                "styling_tips": item.get("styling_tips", [])
+                            })
+                        elif isinstance(item, str):
+                            # Handle string ID format
+                            value_items.append(item)
+                
+                # Create formatted response
+                formatted_response = {
+                    "text": response.get("text", ""),
+                    "value": value_items,  # Include wardrobe item references
+                    "needs_info": "suggest",
+                    "context": response.get("context", {}),
+                    "recommendations": {
+                        "category_suggestions": category_suggestions,
+                        "products": []
+                    }
                 }
                 
-                # Add styling tips from final recommendation if available
-                for item in final_recommendation.get("items", []):
-                    if item["product_id"] == product["product_id"]:
-                        formatted_product["styling_tips"] = item.get("styling_tips", [])
-                        break
+                # Only process products if they exist
+                if isinstance(recommendations, dict) and recommendations.get("products"):
+                    for product in recommendations["products"]:
+                        if not isinstance(product, dict):
+                            continue
+                        
+                        formatted_product = {
+                            "category": product.get("category", ""),
+                            "product_id": product.get("product_id", ""),
+                            "product_text": product.get("product_text", ""),
+                            "retailer": product.get("retailer", ""),
+                            "similarity_score": product.get("similarity_score", 0.0),
+                            "image_urls": product.get("image_urls", []),
+                            "url": product.get("url", ""),
+                            "price": product.get("price", ""),
+                            "brand": product.get("brand", ""),
+                            "name": product.get("name", ""),
+                            "description": product.get("description", ""),
+                            "suggestion": category_suggestions.get(product.get("category", ""), ""),
+                            "gender": product.get("gender", ""),
+                            "styling_tips": []
+                        }
+                        
+                        formatted_response["recommendations"]["products"].append(formatted_product)
                 
-                formatted_response["recommendations"]["products"].append(formatted_product)
-            
-            # print(formatted_response, "formatted_response printing")
-            return {
-                "messages": state["messages"],
-                "response": json.dumps(formatted_response)
-            }
-            
+                return {
+                    "messages": state["messages"],
+                    "response": json.dumps(formatted_response)
+                }
+                
         except Exception as e:
             print(f"Error formatting product response: {str(e)}")
             error_response = {
-                "text": f"Error formatting recommendations: {str(e)}",
+                "text": f"I apologize, but I encountered an error formatting the recommendations: {str(e)}",
                 "value": [],
-                "recommendations": recommendations  # Return raw recommendations on error
+                "needs_info": "speak",
+                "context": {
+                    "error": str(e),
+                    "understood": ["formatting attempted"],
+                    "missing": [],
+                    "question": ""
+                }
             }
             return {
                 "messages": state["messages"],
@@ -387,17 +475,7 @@ class FashionAssistant:
 
         Current User Query: {state['user_query']}
 
-        Follow your chain of thought process and respond in EXACTLY this format:
-        {{
-            "text": "your message or question",
-            "value": [],
-            "needs_info": true/false,
-            "context": {{
-                "understood": ["what you know"],
-                "missing": ["what you need"],
-                "question": "your question"
-            }}
-        }}
+        Follow your chain of thought process. Begin with foundational analysis and style profile building. Format the result aa shown in previous conversation.
         """
         
         message = self.client.beta.threads.messages.create(
@@ -453,7 +531,13 @@ class FashionAssistant:
             error_response = {
                 "text": "I apologize, but I encountered an error processing your request.",
                 "value": [],
-                "needs_info": False
+                "needs_info": "speak",  # Changed from False
+                "context": {
+                    "error": str(e),
+                    "understood": [],
+                    "missing": [],
+                    "question": ""
+                }
             }
             return {
                 "messages": state.get("messages", []),
@@ -461,10 +545,29 @@ class FashionAssistant:
                 "user_query": state['user_query']
             }
 
+
     @traceable
     async def check_recommendation_need(self, state: State) -> Dict[str, Any]:
         """Determine if external product recommendations are needed"""
         try:
+            # Check if we have a direct response case (no recommendations needed)
+            try:
+                response = json.loads(state.get("response", "{}"))
+
+                # If it's a speak mode response, don't get recommendations
+                if response.get("needs_info") == "speak":
+                    return {
+                        **state,
+                        "needs_recommendations": False,
+                        "shopping_analysis": {
+                            "needs_shopping": False,
+                            "confidence": 1.0,
+                            "reasoning": "Direct response, no recommendations needed",
+                            "categories": []
+                        }
+                    }
+            except (json.JSONDecodeError, KeyError):
+                pass
             # First check if wardrobe is empty
             if not state["wardrobe_data"]:
                 return {
@@ -480,15 +583,16 @@ class FashionAssistant:
             # Get or create thread
             thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
 
-            system_prompt = """You are a shopping intent analyzer. Determine if the user's query indicates 
-            interest in purchasing or shopping for new items. Consider both explicit mentions and implicit intent.
+            system_prompt = """You will be given user query and based on that determine if the user's query indicates 
+            interest in getting recommendations from the wardrobe or recommendations for shopping for new items. Consider both explicit mentions and implicit intent.
             Return ONLY a JSON with this exact structure:
             {
-                "needs_shopping": boolean,
+                "needs_shopping": boolean, 
                 "confidence": float,
                 "reasoning": "brief explanation",
                 "categories": ["category1", "category2"]
             }
+            if user wants recommendations for shopping for new items, return "needs_shopping": true, otherwise return "needs_shopping": false.
             """
 
             wardrobe_info = "\n".join([f"- {item['caption']}" for item in state["wardrobe_data"]])
@@ -498,7 +602,7 @@ class FashionAssistant:
             {wardrobe_info}
             
             Analyze if they need new items or can be styled with existing wardrobe.
-            If the wardrobe lacks essential items to create a complete outfit, indicate that shopping is needed."""
+            If the wardrobe lacks essential items to create a complete outfit, indicate that shopping is needed which means return "needs_shopping": true."""
 
             # Create message in thread
             message = self.client.beta.threads.messages.create(
@@ -525,7 +629,7 @@ class FashionAssistant:
             messages = self.client.beta.threads.messages.list(thread_id=thread_id)
             analysis = json.loads(messages.data[0].content[0].text.value)
             needs_recommendations = analysis.get("needs_shopping", False)
-
+            print(analysis, "analysis printing", "check_recommendation_need")
             # If wardrobe response exists but has no items referenced, trigger recommendations
             if state.get("wardrobe_response") and not state["wardrobe_response"].get("value"):
                 needs_recommendations = True
@@ -540,57 +644,80 @@ class FashionAssistant:
                 
         except Exception as e:
             print(f"Error in shopping intent analysis: {str(e)}")
+            error_response = {
+                "text": f"I encountered an error analyzing shopping needs: {str(e)}",
+                "value": [],
+                "needs_info": "speak",  # Changed from True
+                "context": {
+                    "error": str(e),
+                    "understood": ["error occurred"],
+                    "missing": [],
+                    "question": ""
+                }
+            }
             return {
                 **state,
-                "needs_recommendations": True,
+                "response": json.dumps(error_response),
+                "needs_recommendations": False,
                 "shopping_analysis": {
-                    "needs_shopping": True,
-                    "confidence": 0.5,
-                    "reasoning": "Fallback due to analysis error",
+                    "needs_shopping": False,
+                    "confidence": 0.0,
+                    "reasoning": f"Error occurred: {str(e)}",
                     "categories": []
                 }
             }
 
     def should_get_recommendations(self, state: State) -> bool:
         """Conditional edge handler for recommendation flow"""
-        return state.get("needs_recommendations", False)
+        try:
+            # print(state, "state printing")
+            response = json.loads(state.get("response", "{}"))
+            # Check if we need product suggestions
+            if response.get("needs_info") == "suggest":
+                return True
+            # If it's speak mode or no specific needs_info, go to wardrobe response
+            return False
+        except (json.JSONDecodeError, KeyError):
+            return False
 
     @traceable
     async def generate_wardrobe_response(self, state: State) -> Dict[str, Any]:
-        """Generate initial response using only wardrobe items"""
+        """Generate response using wardrobe items"""
+        print("generate_wardrobe_response")
         try:
             thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
             
-            # Format wardrobe items with clear IDs
+            # Format wardrobe items
             wardrobe_info = "\n".join(
                 f"ID: {item['token_name']} | {item['caption']}" 
                 for item in state["wardrobe_data"]
             )
             
-            # Create focused context message
-            context_message = f"""You are {state['stylist_id'].capitalize()}. Maintain your unique styling perspective.
+            print(wardrobe_info, "wardrobe_info printing")
+            context_message = f"""You are {state['stylist_id'].capitalize()}. 
+            Available Wardrobe Items:
+            {wardrobe_info}
+            User Query: {state['user_query']}
 
-                            Available Wardrobe Items:
-                            {wardrobe_info}
-
-                            Target Item ID: {state['image_id']}
-                            User Query: {state['user_query']}
-
-                            CRITICAL INSTRUCTION:
-                            Respond with ONLY a JSON string in this exact format:
-                            {{
-                                "text": "<your complete styling advice>",
-                                "value": ["token_name1", "token_name2"]
-                            }}
-
-                            - The text field should contain your complete styling advice
-                            - The value array MUST contain the token_names of items you referenced
-                            - Do not include wardrobe item token names in the styling advice
-                            - Include ALL wardrobe items you mentioned in your advice in the value array
-                            - Do not add any text outside the JSON structure
-                            """
+            Respond with a JSON containing:
+            {{
+                "text": "your styling advice",
+                "value": ["token_name1", "token_name2"],
+                "needs_info": "suggest",
+                "context": {{
+                    "understood": ["what you understood"],
+                    "missing": [],
+                    "question": ""
+                }},
+                "recommendations": {{
+                    "category_suggestions": {{
+                        "category1": "detailed suggestion",
+                        "category2": "detailed suggestion"
+                    }}
+                }}
+            }}"""
             
-            # Get styling advice
+            # Get styling advice from assistant
             message = client.beta.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
@@ -602,6 +729,7 @@ class FashionAssistant:
                 assistant_id=self.assistant.id
             )
             
+            # Wait for completion
             while True:
                 run_status = client.beta.threads.runs.retrieve(
                     thread_id=thread_id,
@@ -611,52 +739,43 @@ class FashionAssistant:
                     break
                 await asyncio.sleep(1)
             
+            # Get response
             messages = client.beta.threads.messages.list(thread_id=thread_id)
-            latest_message = messages.data[0].content[0].text.value
+            wardrobe_response = json.loads(messages.data[0].content[0].text.value)
             
-            try:
-                # Ensure we're parsing only the JSON part
-                json_str = latest_message.strip()
-                if json_str.startswith('```json'):
-                    json_str = json_str[7:-3]  # Remove ```json and ``` markers
-                
-                wardrobe_response = json.loads(json_str)
-                
-                # Validate response format
-                if not isinstance(wardrobe_response, dict):
-                    raise ValueError("Response must be a dictionary")
-                if "text" not in wardrobe_response or "value" not in wardrobe_response:
-                    raise ValueError("Response missing required fields")
-                if not isinstance(wardrobe_response["value"], list):
-                    wardrobe_response["value"] = []
-                
-                # Add response to state
-                state["response"] = json.dumps(wardrobe_response)
-                
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"Invalid response format: {str(e)}\nResponse: {latest_message}")
-                wardrobe_response = {
-                    "text": "I apologize, but I couldn't generate a proper response. Please try again.",
-                    "value": []
+            # Ensure proper format
+            if "needs_info" not in wardrobe_response:
+                wardrobe_response["needs_info"] = "suggest"
+            if "recommendations" not in wardrobe_response:
+                wardrobe_response["recommendations"] = {
+                    "category_suggestions": {}
                 }
-                state["response"] = json.dumps(wardrobe_response)
             
             return {
                 **state,
-                "wardrobe_response": wardrobe_response
+                "wardrobe_response": wardrobe_response,
+                "response": json.dumps(wardrobe_response)
             }
             
         except Exception as e:
             print(f"Error in generate_wardrobe_response: {str(e)}")
             error_response = {
-                "text": f"Error generating wardrobe advice: {str(e)}",
-                "value": []
+                "text": f"I apologize, but I encountered an error generating wardrobe advice: {str(e)}",
+                "value": [],
+                "needs_info": "speak",  # Changed from False
+                "context": {
+                    "error": str(e),
+                    "understood": ["wardrobe analysis attempted"],
+                    "missing": [],
+                    "question": ""
+                }
             }
-            state["response"] = json.dumps(error_response)
             return {
                 **state,
-                "wardrobe_response": error_response
+                "wardrobe_response": error_response,
+                "response": json.dumps(error_response)
             }
+
     @traceable
     async def get_product_recommendations(self, state: State) -> Dict[str, Any]:
         """Get product recommendations if needed"""
@@ -679,7 +798,7 @@ class FashionAssistant:
                 query=enhanced_query
             )
             
-            # print(recommendations, "recommendations printing")
+            print(recommendations, "recommendations printing")
             # exit(-1)
             return {
                 **state,
@@ -688,9 +807,21 @@ class FashionAssistant:
             
         except Exception as e:
             print(f"Error getting product recommendations: {str(e)}")
+            error_response = {
+                "text": f"I encountered an error while finding product recommendations: {str(e)}",
+                "value": [],
+                "needs_info": "speak",  # Changed from False
+                "context": {
+                    "error": str(e),
+                    "understood": ["product recommendation attempted"],
+                    "missing": [],
+                    "question": ""
+                }
+            }
             return {
                 **state,
-                "product_recommendations": {"error": str(e)}
+                "product_recommendations": None,
+                "response": json.dumps(error_response)
             }
 
     @traceable
@@ -769,8 +900,15 @@ f"\n- {product['category'].upper()}:"
         except Exception as e:
             print(f"Error in generate_final_response: {str(e)}")
             error_response = {
-                "text": f"An error occurred: {str(e)}",
+                "text": f"I apologize, but I encountered an error generating the final response: {str(e)}",
                 "value": [],
+                "needs_info": "speak",  # Changed from False
+                "context": {
+                    "error": str(e),
+                    "understood": ["final response generation attempted"],
+                    "missing": [],
+                    "question": ""
+                },
                 "wardrobe_styling": state.get("wardrobe_response", {}),
                 "recommendations": state.get("product_recommendations", {}),
                 "shopping_analysis": state.get("shopping_analysis", {})
