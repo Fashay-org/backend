@@ -503,7 +503,7 @@ class FashionAssistant:
         
 
         print(response_text, "response_text printingggggggggggggggggggggggggggggg")
-        try:
+        if 1:
             json_start = response_text.find('{"text":')
             if json_start == -1:
                 json_start = response_text.find('{')
@@ -525,25 +525,25 @@ class FashionAssistant:
                 "user_query": state['user_query']
             }
                     
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse response: {response_text}")
-            print(f"JSON error: {str(e)}")
-            error_response = {
-                "text": "I apologize, but I encountered an error processing your request.",
-                "value": [],
-                "needs_info": "speak",  # Changed from False
-                "context": {
-                    "error": str(e),
-                    "understood": [],
-                    "missing": [],
-                    "question": ""
-                }
-            }
-            return {
-                "messages": state.get("messages", []),
-                "response": json.dumps(error_response),
-                "user_query": state['user_query']
-            }
+        # except json.JSONDecodeError as e:
+        #     print(f"Failed to parse response: {response_text}")
+        #     print(f"JSON error: {str(e)}")
+        #     error_response = {
+        #         "text": "I apologize, but I encountered an error processing your request.",
+        #         "value": [],
+        #         "needs_info": "speak",  # Changed from False
+        #         "context": {
+        #             "error": str(e),
+        #             "understood": [],
+        #             "missing": [],
+        #             "question": ""
+        #         }
+        #     }
+        #     return {
+        #         "messages": state.get("messages", []),
+        #         "response": json.dumps(error_response),
+        #         "user_query": state['user_query']
+        #     }
 
 
     @traceable
@@ -629,13 +629,14 @@ class FashionAssistant:
             messages = self.client.beta.threads.messages.list(thread_id=thread_id)
             analysis = json.loads(messages.data[0].content[0].text.value)
             needs_recommendations = analysis.get("needs_shopping", False)
-            print(analysis, "analysis printing", "check_recommendation_need")
+            # print(analysis, "analysis printing", "check_recommendation_need")
             # If wardrobe response exists but has no items referenced, trigger recommendations
             if state.get("wardrobe_response") and not state["wardrobe_response"].get("value"):
                 needs_recommendations = True
                 analysis["needs_shopping"] = True
                 analysis["reasoning"] += " (No suitable items found in wardrobe)"
             
+            # print(state, "state printing", "check_recommendation_need")
             return {
                 **state,
                 "needs_recommendations": needs_recommendations,
@@ -693,7 +694,7 @@ class FashionAssistant:
                 for item in state["wardrobe_data"]
             )
             
-            print(wardrobe_info, "wardrobe_info printing")
+            # print(wardrobe_info, "wardrobe_info printing")
             context_message = f"""You are {state['stylist_id'].capitalize()}. 
             Available Wardrobe Items:
             {wardrobe_info}
@@ -701,7 +702,7 @@ class FashionAssistant:
 
             Respond with a JSON containing:
             {{
-                "text": "your styling advice",
+                "text": "your styling advice, no token names here in the text. Just the styling advice",
                 "value": ["token_name1", "token_name2"],
                 "needs_info": "suggest",
                 "context": {{
@@ -744,6 +745,7 @@ class FashionAssistant:
             wardrobe_response = json.loads(messages.data[0].content[0].text.value)
             
             # Ensure proper format
+            print(wardrobe_response, "111111wardrobe_response printing")
             if "needs_info" not in wardrobe_response:
                 wardrobe_response["needs_info"] = "suggest"
             if "recommendations" not in wardrobe_response:
@@ -751,6 +753,7 @@ class FashionAssistant:
                     "category_suggestions": {}
                 }
             
+            print(wardrobe_response, "22222wardrobe_response printing")
             return {
                 **state,
                 "wardrobe_response": wardrobe_response,
