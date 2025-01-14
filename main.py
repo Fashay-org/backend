@@ -1,28 +1,29 @@
-from fastapi import FastAPI, UploadFile, HTTPException, File, Form, Body, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Query, HTTPException
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, EmailStr, validator
 from typing import List, Dict, Optional, Union
 from datetime import datetime, timedelta
 from langsmith.wrappers import wrap_openai
 import base64
 import tempfile
 from langsmith import traceable
-from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
+from tenacity import retry, stop_after_attempt, wait_exponential
 from openai import OpenAI
 from PIL import Image
 from io import BytesIO
-from fastapi import FastAPI, UploadFile, HTTPException, File, Form, Body, Request, Depends
-from urllib.parse import parse_qsl
+from fastapi import FastAPI, HTTPException, Request
 from typing import Optional
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from supabase import create_client, Client
-import bcrypt
+from passlib.hash import bcrypt
 import json
+import asyncio
+from starlette.responses import JSONResponse
 import os
 import uuid
 import time
@@ -30,15 +31,35 @@ from enum import Enum
 from decimal import Decimal
 import base64
 import smtplib
-import random
-import string
 import re
+from fastapi import FastAPI
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import JSONResponse
+import asyncio
 import secrets
 from RAG_agents import chat_with_stylist, get_or_create_assistant
 from dotenv import load_dotenv
 
-# Initialize FastAPI app
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            # Set to 28 seconds to be just under Heroku's 30-second limit
+            return await asyncio.wait_for(call_next(request), timeout=28)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504, 
+                detail="Request processing time exceeded 28 seconds"
+            )
+
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(TimeoutMiddleware)
 
 # Load environment variables
 load_dotenv()
@@ -259,13 +280,7 @@ def send_verification_email(email: str, code: str) -> bool:
 
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 
 
 @app.get("/products", response_model=ProductResponse)
@@ -575,7 +590,8 @@ async def signup(data: SignupRequest):
     if data.password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
     
-    hashed_password = bcrypt.hashpw(data.password.encode('utf-8'), bcrypt.gensalt())
+    # Modified password hashing
+    hashed_password = bcrypt.hash(data.password)
     unique_id = str(uuid.uuid4())
     verification_code = generate_verification_code()
     
@@ -597,7 +613,7 @@ def save_to_db(email, hashed_password, unique_id):
     data = {
         "unique_id": unique_id,
         "email": email,
-        "password": hashed_password.decode('utf-8')
+        "password": hashed_password
     }
     response = supabase.table("wardrobe").insert(data).execute()
     
@@ -634,16 +650,19 @@ async def login(data: AuthBase):
         raise HTTPException(status_code=404, detail="Email not found")
 
     record = response.data[0]
-    hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
-    
-    if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
+    stored_hash = record["password"]  # No need to encode, passlib handles this
+
+    try:
+        if not bcrypt.verify(data.password, stored_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+        return StandardResponse(
+            status="success",
+            message="Login successful. Redirecting to home."
+        )
+    except Exception as e:
+        print(f"Password verification error: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid password")
-
-    return StandardResponse(
-        status="success",
-        message="Login successful. Redirecting to home."
-    )
-
 def clean_expired_codes():
     """Remove expired verification codes from cache"""
     current_time = datetime.now()
@@ -693,9 +712,9 @@ async def reset_password(data: PasswordResetRequest):
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_message)
 
-    hashed_password = bcrypt.hashpw(data.new_password.encode('utf-8'), bcrypt.gensalt())
+    hashed_password = bcrypt.hash(data.new_password)
     response = supabase.table("wardrobe").update({
-        "password": hashed_password.decode('utf-8')
+        "password": hashed_password
     }).eq("email", data.email).execute()
 
     if not response.data:
@@ -707,68 +726,91 @@ async def reset_password(data: PasswordResetRequest):
         message="Password reset successfully"
     )
 
+@app.middleware("http")
+async def timeout_middleware(request, call_next):
+    try:
+        # Replace asyncio.timeout with asyncio.wait_for for compatibility with Python <3.11
+        return await asyncio.wait_for(call_next(request), timeout=75)  # Set a timeout of 75 seconds
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timed out")
+    except Exception as e:
+        # Log other exceptions for debugging
+        print(f"Error in timeout_middleware: {e}")
+        raise
 # Chat and Styling Endpoints
 @app.post("/chat", response_model=ChatResponse)
-@traceable
 async def handle_chat(data: ChatRequest):
-    # Verify credentials
-    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
-    if not response.data:
-        raise HTTPException(status_code=404, detail="Email not found")
-    
-    record = response.data[0]
-    hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
-    
-    if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid password")
+    try:
+        print("Step 1: Starting chat request")
+        print("Received data:", data.dict())
 
-    unique_id = record["unique_id"]
-    
-    # Get wardrobe data with full information including URLs
-    image_data = supabase.table("image_data")\
-        .select("token_name, image_caption, image_url")\
-        .eq("unique_id", unique_id)\
-        .execute()
+        print("Step 2: Verifying credentials")
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
         
-    wardrobe_data = [
-        {
-            "token_name": record["token_name"],
-            "caption": record["image_caption"],
-            "image_url": record["image_url"]
-        } 
-        for record in image_data.data
-    ]
+        record = response.data[0]
+        stored_hash = record["password"]
+        
+        print("Step 3: Verifying password")
+        if not bcrypt.verify(data.password, stored_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
 
-    if 1:
-        result = await async_generate_with_retry(
-            query=data.input_text,
-            unique_id=unique_id,
-            stylist_id=data.stylist.lower(),
-            image_id=data.token_name,
-            wardrobe_data=wardrobe_data
-        )
-        # print("Raw result:", result)  # Add this to see the raw response
-        parsed_result = json.loads(result)
-        text = parsed_result.get("text", "No response text found.")
+        unique_id = record["unique_id"]
+        
+        print("Step 4: Fetching wardrobe data")
+        image_data = supabase.table("image_data")\
+            .select("token_name, image_caption, image_url")\
+            .eq("unique_id", unique_id)\
+            .execute()
+            
+        wardrobe_data = [
+            {
+                "token_name": record["token_name"],
+                "caption": record["image_caption"],
+                "image_url": record["image_url"]
+            } 
+            for record in image_data.data
+        ]
+        print(f"Found {len(wardrobe_data)} wardrobe items")
 
-        # print(parsed_result, "parsed_result")
-        # Get wardrobe images
+        print("Step 5: Generating response")
+        try:
+            # Replace asyncio.timeout with asyncio.wait_for
+            result = await async_generate_with_retry(
+                    query=data.input_text,
+                    unique_id=unique_id,
+                    stylist_id=data.stylist.lower(),
+                    image_id=data.token_name,
+                    wardrobe_data=wardrobe_data
+                )
+            #     timeout=0 # Timeout duration in seconds
+            # )
+        except asyncio.TimeoutError:
+            print("Response generation timed out")
+            raise HTTPException(status_code=504, detail="Response generation timed out")
+        
+        print("Step 6: Parsing response")
+        try:
+            parsed_result = json.loads(result)
+            text = parsed_result.get("text", "No response text found.")
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {str(e)}")
+            print(f"Raw result: {result}")
+            raise HTTPException(status_code=500, detail="Failed to parse response")
+
+        print("Step 7: Processing images")
         images = []
         value_items = parsed_result.get("value", [])
         if value_items and isinstance(value_items, list):
-            # Initialize set for product IDs
             product_ids = set()
             
-            # Handle both string IDs and dictionary items
             for item in value_items:
                 if isinstance(item, dict) and "product_id" in item:
-                    # Handle dictionary format
                     product_ids.add(item["product_id"])
                 elif isinstance(item, str):
-                    # Handle direct string ID format
                     product_ids.add(item)
             
-            # Match product IDs against wardrobe items
             for product_id in product_ids:
                 matching_item = next(
                     (item for item in wardrobe_data if item["token_name"] == product_id),
@@ -780,28 +822,25 @@ async def handle_chat(data: ChatRequest):
                         image_url=matching_item["image_url"],
                         token_name=matching_item["token_name"]
                     ))
+        print(f"Processed {len(images)} images")
 
-        # print(images, "images")
+        print("Step 8: Processing recommendations")
         recommendations = None
         if "recommendations" in parsed_result:
             recs = parsed_result["recommendations"]
-            
-            # Format product recommendations
             products = []
+            
             for product in recs.get("products", []):
                 try:
-                    # Handle product text which might be string or dictionary
                     if isinstance(product.get("product_text"), dict):
                         product_text = " ".join(str(v) for v in product["product_text"].values() if v)
                     else:
                         product_text = str(product.get("product_text", ""))
 
-                    # Handle price - ensure it's a string
-                    price = product.get("price", "")
+                    price = str(product.get("price", ""))
                     if isinstance(price, (int, float)):
                         price = str(price)
 
-                    # Create product recommendation
                     products.append(ProductRecommendation(
                         category=product.get("category", ""),
                         product_id=product.get("product_id", ""),
@@ -820,17 +859,15 @@ async def handle_chat(data: ChatRequest):
                     print(f"Error processing product: {str(e)}")
                     continue
 
-            # Only create recommendations if we have valid products
             if products:
                 recommendations = Recommendations(
                     category_suggestions=recs.get("category_suggestions", {}),
                     products=products
                 )
-
-        # Get shopping analysis if available
+        
+        print("Step 9: Preparing final response")
         shopping_analysis = parsed_result.get("shopping_analysis")
 
-        # Return chat response
         return ChatResponse(
             reply=text,
             images=images,
@@ -838,13 +875,15 @@ async def handle_chat(data: ChatRequest):
             shopping_analysis=shopping_analysis
         )
     
-    # except json.JSONDecodeError as e:
-    #     print(f"JSON parse error: {str(e)}")
-    #     raise HTTPException(status_code=500, detail=f"Failed to parse response: {str(e)}")
-    # except Exception as e:
-    #     print(f"Error in handle_chat: {str(e)}")
-    #     # print(f"Result was: {result}")  # Log the raw result for debugging
-    #     raise HTTPException(status_code=500, detail=f"Failed to generate response: {str(e)}")
+    except Exception as e:
+        print(f"Error in handle_chat: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+# @traceable
 class ImageUploadRequest(BaseModel):
     email: str
     password: str
@@ -979,15 +1018,14 @@ async def upload_image(data: ImageUploadRequest):
 @app.post("/user_profile", response_model=ProfileResponse)
 async def create_or_update_profile(data: UserProfileData):
     try:
-        # Verify credentials
         response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
         if not response.data:
             raise HTTPException(status_code=404, detail="Email not found")
         
         record = response.data[0]
-        hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
+        stored_hash = record["password"]
         
-        if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
+        if not bcrypt.verify(data.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid password")
 
         unique_id = record["unique_id"]
@@ -1279,15 +1317,14 @@ async def add_style_response(data: StyleResponse):
 @app.post("/style/preference", response_model=StandardResponse)
 async def update_preference(data: OutfitPreference):
     try:
-        # Verify user credentials
         user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
         if not user_response.data:
             raise HTTPException(status_code=404, detail="User not found")
         
         record = user_response.data[0]
-        hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
+        stored_hash = record["password"]
         
-        if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
+        if not bcrypt.verify(data.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Verify preference value
@@ -1315,15 +1352,14 @@ async def update_preference(data: OutfitPreference):
 @app.post("/style/save-outfit", response_model=StandardResponse)
 async def save_outfit(data: SaveOutfit):
     try:
-        # Verify user credentials
         user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
         if not user_response.data:
             raise HTTPException(status_code=404, detail="User not found")
         
         record = user_response.data[0]
-        hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
+        stored_hash = record["password"]
         
-        if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
+        if not bcrypt.verify(data.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Update outfit data
@@ -1356,15 +1392,14 @@ async def save_outfit(data: SaveOutfit):
 @app.get("/style/saved-outfits/{unique_id}", response_model=StandardResponse)
 async def get_saved_outfits(unique_id: str, data: AuthBase):
     try:
-        # Verify user credentials
         user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
         if not user_response.data:
             raise HTTPException(status_code=404, detail="User not found")
         
         record = user_response.data[0]
-        hashed_password = record["password"].encode('utf-8') if isinstance(record["password"], str) else record["password"]
+        stored_hash = record["password"]
         
-        if not bcrypt.checkpw(data.password.encode('utf-8'), hashed_password):
+        if not bcrypt.verify(data.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Get saved outfits
