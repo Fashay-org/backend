@@ -460,71 +460,124 @@ class FashionAssistant:
             }
     @traceable
     async def process_user_input(self, state: State) -> Dict[str, Any]:
-        thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
-        thread_key = self._get_thread_key(state["unique_id"], state["stylist_id"])
+        try:
+            thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
+            thread_key = self._get_thread_key(state["unique_id"], state["stylist_id"])
+            
+            # Initialize if needed
+            if thread_key not in self.conversation_context:
+                self.conversation_context[thread_key] = []
         
-        # Initialize if needed
-        if thread_key not in self.conversation_context:
-            self.conversation_context[thread_key] = []
-        # conversation_messages = self.conversation_context[thread_key]
-    
-        # Create the system and user message
-        context_message = f"""
-        Previous Conversation:
-        {chr(10).join(self.conversation_context[thread_key]) if self.conversation_context[thread_key] else "No previous conversation"}
+            # Create the system and user message
+            context_message = f"""
+            Previous Conversation:
+            {chr(10).join(self.conversation_context[thread_key]) if self.conversation_context[thread_key] else "No previous conversation"}
 
-        Current User Query: {state['user_query']}
+            Current User Query: {state['user_query']}
 
-        Follow your chain of thought process. Begin with foundational analysis and style profile building. Format the result aa shown in previous conversation.
-        """
-        
-        message = self.client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=[{"type": "text", "text": context_message}]
-        )
-        
-        run = self.client.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=self.assistant.id
-        )
-        
-        while True:
-            run_status = self.client.beta.threads.runs.retrieve(
+            Follow your chain of thought process. Begin with foundational analysis and style profile building.
+            Return a clean JSON response without any comments.
+            """
+            
+            message = self.client.beta.threads.messages.create(
                 thread_id=thread_id,
-                run_id=run.id
+                role="user",
+                content=[{"type": "text", "text": context_message}]
             )
-            if run_status.status == "completed":
-                break
-            await asyncio.sleep(1)
-        
-        messages = self.client.beta.threads.messages.list(thread_id=thread_id)
-        response_text = messages.data[0].content[0].text.value
-        
+            
+            run = self.client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=self.assistant.id
+            )
+            
+            while True:
+                run_status = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run.id
+                )
+                if run_status.status == "completed":
+                    break
+                await asyncio.sleep(1)
+            
+            messages = self.client.beta.threads.messages.list(thread_id=thread_id)
+            response_text = messages.data[0].content[0].text.value
 
-        print(response_text, "response_text printingggggggggggggggggggggggggggggg")
-        if 1:
-            json_start = response_text.find('{"text":')
-            if json_start == -1:
-                json_start = response_text.find('{')
+            # Clean up the response text
+            def clean_json_string(text: str) -> str:
+                # Find the first opening brace
+                start_idx = text.find('{')
+                if start_idx == -1:
+                    raise ValueError("No JSON object found in response")
+                    
+                # Find the matching closing brace
+                brace_count = 0
+                for i in range(start_idx, len(text)):
+                    if text[i] == '{':
+                        brace_count += 1
+                    elif text[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            # Found complete JSON object
+                            return text[start_idx:i+1]
                 
-            json_text = response_text[json_start:]
-            response = json.loads(json_text)
-            
-            # Store the conversation flow
-            self.conversation_context[thread_key].append(f"User: {state['user_query']}")
-            self.conversation_context[thread_key].append(f"Assistant: {response['text']}")
-            
-            # Keep only last N messages for context
-            if len(self.conversation_context[thread_key]) > self.max_history * 2:  # *2 because each turn has user + assistant
-                self.conversation_context[thread_key] = self.conversation_context[thread_key][-self.max_history * 2:]
-            
+                raise ValueError("No complete JSON object found")
+
+            try:
+                cleaned_json = clean_json_string(response_text)
+                response = json.loads(cleaned_json)
+                
+                # Store the conversation flow
+                self.conversation_context[thread_key].append(f"User: {state['user_query']}")
+                self.conversation_context[thread_key].append(f"Assistant: {response['text']}")
+                
+                # Keep only last N messages for context
+                if len(self.conversation_context[thread_key]) > self.max_history * 2:
+                    self.conversation_context[thread_key] = self.conversation_context[thread_key][-self.max_history * 2:]
+                
+                return {
+                    "messages": state.get("messages", []),
+                    "response": json.dumps(response),
+                    "user_query": state['user_query']
+                }
+                        
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"Failed to parse response: {response_text}")
+                print(f"JSON error: {str(e)}")
+                error_response = {
+                    "text": "I apologize, but I encountered an error processing your request.",
+                    "value": [],
+                    "needs_info": "speak",
+                    "context": {
+                        "error": str(e),
+                        "understood": [],
+                        "missing": [],
+                        "question": ""
+                    }
+                }
+                return {
+                    "messages": state.get("messages", []),
+                    "response": json.dumps(error_response),
+                    "user_query": state['user_query']
+                }
+                
+        except Exception as e:
+            print(f"Error in process_user_input: {str(e)}")
+            error_response = {
+                "text": f"I apologize, but I encountered an error: {str(e)}",
+                "value": [],
+                "needs_info": "speak",
+                "context": {
+                    "error": str(e),
+                    "understood": [],
+                    "missing": [],
+                    "question": ""
+                }
+            }
             return {
                 "messages": state.get("messages", []),
-                "response": json.dumps(response),
+                "response": json.dumps(error_response),
                 "user_query": state['user_query']
             }
-                    
         # except json.JSONDecodeError as e:
         #     print(f"Failed to parse response: {response_text}")
         #     print(f"JSON error: {str(e)}")

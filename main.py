@@ -59,7 +59,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(TimeoutMiddleware)
+# app.add_middleware(TimeoutMiddleware)
 
 # Load environment variables
 load_dotenv()
@@ -776,6 +776,8 @@ async def handle_chat(data: ChatRequest):
 
         print("Step 5: Generating response")
         try:
+            
+            start_time = time.time()
             # Replace asyncio.timeout with asyncio.wait_for
             result = await async_generate_with_retry(
                     query=data.input_text,
@@ -784,6 +786,8 @@ async def handle_chat(data: ChatRequest):
                     image_id=data.token_name,
                     wardrobe_data=wardrobe_data
                 )
+            print(f"Step X: Duration: {time.time() - start_time} seconds")
+
             #     timeout=0 # Timeout duration in seconds
             # )
         except asyncio.TimeoutError:

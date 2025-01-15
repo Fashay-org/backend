@@ -8,6 +8,7 @@ import pickle
 from sklearn.metrics.pairwise import cosine_similarity
 import json
 import time
+from pinecone import Pinecone
 class ProductRecommender:
     def __init__(self, thread_manager: Dict = None):
         load_dotenv()
@@ -16,8 +17,11 @@ class ProductRecommender:
             os.environ.get("SUPABASE_URL"),
             os.environ.get("SUPABASE_KEY")
         )
+        # Initialize Pinecone
+        self.pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+        self.index = self.pc.Index("fashayrecommnder")
         
-        # Use shared thread management if provided, otherwise create own
+        # Thread management setup
         if thread_manager:
             self._get_or_create_thread = thread_manager['get_thread']
             self.user_threads = thread_manager['user_threads']
@@ -27,36 +31,8 @@ class ProductRecommender:
             self.user_threads = {}
             self.last_interaction = {}
             self.conversation_context = {}
-        print("Loading product embeddings...")
-        self.assistant = self._create_assistant() 
-        try:
-            with open('Final_embeddings/product_embeddings_final.pkl', 'rb') as f:
-                loaded_data = pickle.load(f)
-            
-            if isinstance(loaded_data, dict):
-                self.embeddings_dict = loaded_data.get('embeddings', loaded_data)
-            else:
-                raise ValueError("Unexpected format in embeddings file")
 
-            # Validate embeddings
-            invalid_ids = [
-                pid for pid, data in list(self.embeddings_dict.items())
-                if not isinstance(data, dict) or 'embedding' not in data or 'text' not in data
-            ]
-            for pid in invalid_ids:
-                del self.embeddings_dict[pid]
-
-            self.product_ids = list(self.embeddings_dict.keys())
-            self.embeddings_array = np.array([
-                self.embeddings_dict[pid]['embedding'] 
-                for pid in self.product_ids
-            ])
-            
-            print(f"Successfully loaded {len(self.product_ids)} product embeddings")
-            
-        except Exception as e:
-            print(f"Error loading embeddings: {str(e)}")
-            raise
+        self.assistant = self._create_assistant()
 
     def _create_assistant(self):
         """Create an OpenAI assistant for product recommendations"""
@@ -277,63 +253,56 @@ class ProductRecommender:
         category_products = {}
         
         for category, description in category_suggestions.items():
-            # print(f"\nProcessing category: {category}")
             try:
-                # Create fresh Supabase client for each category to avoid connection timeouts
-                # print(f"Creating new Supabase client for {category}")
+                # Create fresh Supabase client for each category
                 supabase = create_client(
                     os.environ.get("SUPABASE_URL"),
                     os.environ.get("SUPABASE_KEY")
                 )
                 
-                # print(f"Getting embedding for {category}")
                 embedding = self.get_embedding(description)
                 if embedding:
-                    # print("Got embedding, calculating similarities")
-                    query_embedding = np.array(embedding).reshape(1, -1)
-                    similarities = cosine_similarity(query_embedding, self.embeddings_array)[0]
-                    top_indices = similarities.argsort()[::-1]
+                    # Query Pinecone directly with the embedding
+                    query_response = self.index.query(
+                        vector=embedding,
+                        top_k=50,  # Get more results to account for gender filtering
+                        include_metadata=True
+                    )
                     
-                    # print(f"Starting product search for {category}")
-                    for idx in top_indices:
-                        product_id = self.product_ids[idx]
-                        # print(f"Checking product ID: {product_id}")
+                    for match in query_response['matches']:
+                        product_id = match['id']
                         
                         try:
-                            # print("Querying product_references table")
+                            # Get product reference data
                             reference_response = supabase.table("product_references")\
                                 .select("retailer_table, product_id")\
                                 .eq("id", product_id)\
                                 .execute()
                                 
-                            if not reference_response.data or not reference_response.data[0]:
-                                print("No reference data found")
+                            if not reference_response.data:
                                 continue
                                 
                             ref_data = reference_response.data[0]
                             retailer_table = ref_data['retailer_table']
                             original_product_id = ref_data['product_id']
                             
-                            # print(f"Querying retailer table: {retailer_table}")
+                            # Get product details
                             product_response = supabase.table(retailer_table)\
                                 .select("*")\
                                 .eq("id", original_product_id)\
                                 .execute()
                             
-                            if not product_response.data or not product_response.data[0]:
-                                print("No product data found")
+                            if not product_response.data:
                                 continue
                                 
-                            # print("Found product data, checking gender match")
                             prod_data = product_response.data[0]
                             product_gender = prod_data.get('gender', '')
                             
                             if not user_gender or product_gender == user_gender or product_gender == 'unisex':
-                                # print(f"Found matching product for {category}")
                                 category_products[category] = {
                                     'product_id': product_id,
-                                    'similarity_score': float(similarities[idx]),
-                                    'product_text': self.embeddings_dict[product_id]['text'],
+                                    'similarity_score': float(match['score']),
+                                    'product_text': match['metadata']['text'],
                                     'gender': product_gender,
                                     'retailer': retailer_table,
                                     'brand': prod_data.get('brand', ''),
@@ -345,8 +314,6 @@ class ProductRecommender:
                                     'colors': prod_data.get('colors', []),
                                 }
                                 break
-                            else:
-                                print(f"Gender mismatch: Product={product_gender}, User={user_gender}")
                                 
                         except Exception as e:
                             print(f"Error during product check: {str(e)}")
@@ -356,9 +323,6 @@ class ProductRecommender:
                 print(f"Error processing category {category}: {str(e)}")
                 continue
 
-            if category not in category_products:
-                print(f"Warning: No suitable product found for category {category}")
-        
         print("\n=== Finished category recommendations ===")
         return category_products
     def get_final_recommendations(self, query: str, category_suggestions: Dict[str, str], 
