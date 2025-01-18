@@ -5,18 +5,20 @@ langsmith
 numpy
 openai
 opencv_python
-opencv_python
 opencv_python_headless
-Pillow
 Pillow
 pydantic
 python-dotenv
-python_bcrypt
+python-bcrypt
 scikit_learn
 starlette
 supabase
-tenacity
-torch
-torch
-torchvision
+tenacity>=8.0.0  # Add specific version
+pydantic[email]
 uvicorn
+jinja2
+passlib[bcrypt]
+pinecone
+pinecone-plugin-inference
+pinecone-plugin-interface
+python-multipart  # Add this if not present

@@ -37,7 +37,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
 import asyncio
 import secrets
-from RAG_agents import chat_with_stylist, get_or_create_assistant
+from .RAG_agents import chat_with_stylist, get_or_create_assistant
 from dotenv import load_dotenv
 
 class TimeoutMiddleware(BaseHTTPMiddleware):
