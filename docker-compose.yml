@@ -1,13 +1,13 @@
 services:
   api:
     build:
-      context: ..
-      dockerfile: backend/Dockerfile
+      context: .  # Changed from .. to .
+      dockerfile: Dockerfile  # Changed since we're in backend directory
     ports:
       - "8000:8000"
     volumes:
-      - ../frontend:/app/frontend
       - .:/app/backend
+      - ../frontend:/app/frontend  # This is fine for frontend files
     env_file:
       - .env
     deploy:

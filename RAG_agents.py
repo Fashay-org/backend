@@ -11,7 +11,7 @@ from langgraph.graph.message import add_messages
 import asyncio
 
 # Import the ProductRecommender
-from .recommender import ProductRecommender
+from recommender import ProductRecommender
 
 # Load environment variables and setup
 load_dotenv()

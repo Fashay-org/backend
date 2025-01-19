@@ -13,7 +13,7 @@ python-bcrypt
 scikit_learn
 starlette
 supabase
-tenacity>=8.0.0  # Add specific version
+tenacity
 pydantic[email]
 uvicorn
 jinja2

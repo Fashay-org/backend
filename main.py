@@ -11,7 +11,6 @@ from langsmith.wrappers import wrap_openai
 import base64
 import tempfile
 from langsmith import traceable
-from tenacity import retry, stop_after_attempt, wait_exponential
 from openai import OpenAI
 from PIL import Image
 from io import BytesIO
@@ -37,7 +36,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import JSONResponse
 import asyncio
 import secrets
-from .RAG_agents import chat_with_stylist, get_or_create_assistant
+from RAG_agents import chat_with_stylist, get_or_create_assistant
 from dotenv import load_dotenv
 
 class TimeoutMiddleware(BaseHTTPMiddleware):
@@ -253,7 +252,7 @@ def validate_password(password: str) -> tuple[bool, str]:
         return False, "Password must contain at least one special character"
     return True, ""
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
+# @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
 async def async_generate_with_retry(*args, **kwargs):
     return await chat_with_stylist(*args, **kwargs)
 
