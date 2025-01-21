@@ -24,8 +24,11 @@ RUN echo "Contents of requirements.txt:" && \
     echo "\nInstalled packages:" && \
     pip list
 
+# Copy backend files to /app directly
 COPY . /app/backend/
+# Copy frontend files (from parent directory)
+COPY ../frontend /app/frontend/
 
-WORKDIR /app/backend
+WORKDIR /app
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

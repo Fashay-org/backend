@@ -71,34 +71,7 @@ class ProductRecommender:
         except Exception as e:
             print(f"Error creating assistant: {str(e)}")
             raise
-    # def _get_thread_key(self, unique_id, stylist_id):
-    #     return f"{unique_id}_{stylist_id}"
-    # def _cleanup_old_threads(self, max_age_hours=24):
-    #     current_time = time.time()
-    #     threads_to_remove = []
-        
-    #     for thread_key, last_time in self.last_interaction.items():
-    #         if current_time - last_time > max_age_hours * 3600:
-    #             threads_to_remove.append(thread_key)
-        
-    #     for thread_key in threads_to_remove:
-    #         del self.user_threads[thread_key]
-    #         del self.last_interaction[thread_key]
-    # def _get_or_create_thread(self, unique_id, stylist_id):
-    #     thread_key = self._get_thread_key(unique_id, stylist_id)
-    #     current_time = time.time()
-        
-    #     if thread_key in self.user_threads:
-    #         self.last_interaction[thread_key] = current_time
-    #         return self.user_threads[thread_key]
-        
-    #     thread = self.client.beta.threads.create()
-    #     self.user_threads[thread_key] = thread.id
-    #     self.last_interaction[thread_key] = current_time
-        
-    #     self._cleanup_old_threads()
-        
-    #     return thread.id
+
     async def get_user_profile(self, user_id: str) -> Dict:
         """Fetch user profile and preferences from database"""
         try:

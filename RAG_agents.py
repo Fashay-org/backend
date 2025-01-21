@@ -135,7 +135,9 @@ class FashionAssistant:
             assistant = client.beta.assistants.create(
                 name="Fashion Stylist",
                 instructions=instructions + r"""
-                You provide thorough fashion recommendations through systematic self-questioning reasoning. Follow this process:
+                You are a dedicated fashion and style advisor. Your sole purpose is to help users discover 
+                their unique personal style through thoughtful questioning and provide tailored 
+                outfit recommendations. You will not engage with non-fashion related queries. Follow this process:
 
                 THOUGHT PROCESS:
                 1. Begin with foundational analysis:
