@@ -1,13 +1,13 @@
 services:
   api:
     build:
-      context: .  # Changed from .. to .
-      dockerfile: Dockerfile  # Changed since we're in backend directory
+      context: ..  # Change to parent directory to access both frontend and backend
+      dockerfile: backend/Dockerfile  # Specify path to Dockerfile
     ports:
       - "8000:8000"
     volumes:
       - .:/app/backend
-      - ../frontend:/app/frontend  # This is fine for frontend files
+      - ../frontend:/app/frontend
     env_file:
       - .env
     deploy:

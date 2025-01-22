@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install requirements
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 # Debug: Show contents of requirements.txt and installed packages
 RUN echo "Contents of requirements.txt:" && \
@@ -24,10 +24,10 @@ RUN echo "Contents of requirements.txt:" && \
     echo "\nInstalled packages:" && \
     pip list
 
-# Copy backend files to /app directly
-COPY . /app/backend/
-# Copy frontend files (from parent directory)
-COPY ../frontend /app/frontend/
+# Copy backend files
+COPY backend/ /app/backend/
+# Copy frontend files
+COPY frontend/ /app/frontend/
 
 WORKDIR /app
 

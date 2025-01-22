@@ -1,3 +1,9 @@
+Set the virtual environment
+cd Fashay
+py -3.12 -m venv venv
+
+.\venv\Scripts\activate
+
 Fashay Deployment Guide
 This guide covers the deployment process for Fashay application using Docker and AWS.
 Table of Contents

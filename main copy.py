@@ -19,7 +19,7 @@ from typing import Optional
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from supabase import create_client, Client
-from auth_utils import hash_password, verify_password
+from passlib.hash import bcrypt
 import json
 import asyncio
 from starlette.responses import JSONResponse
@@ -38,27 +38,7 @@ import asyncio
 import secrets
 from RAG_agents import chat_with_stylist, get_or_create_assistant
 from dotenv import load_dotenv
-import hashlib
-import base64
 
-def create_hash(password: str) -> str:
-    """Create a simple but secure hash of the password."""
-    # Convert password to bytes and create SHA-256 hash
-    password_bytes = password.encode('utf-8')
-    hash_obj = hashlib.sha256(password_bytes)
-    # Convert hash to base64 string for storage
-    return base64.b64encode(hash_obj.digest()).decode('utf-8')
-
-def verify_password(stored_hash: str, provided_password: str) -> bool:
-    """Verify if the provided password matches the stored hash."""
-    try:
-        # Create hash of provided password
-        provided_hash = create_hash(provided_password)
-        # Compare hashes
-        return provided_hash == stored_hash
-    except Exception as e:
-        print(f"Verification error: {str(e)}")
-        return False
 class TimeoutMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         try:
@@ -169,9 +149,7 @@ class SignupRequest(AuthBase):
 class VerificationRequest(AuthBase):
     verification_code: str
 
-class PasswordResetRequest(BaseModel):
-    email: EmailStr
-    password: str  # Required by AuthBase
+class PasswordResetRequest(AuthBase):
     reset_code: str
     new_password: str
 
@@ -600,132 +578,95 @@ async def read_root(request: Request):
 # Auth Endpoints
 @app.post("/signup", response_model=StandardResponse)
 async def signup(data: SignupRequest):
-    try:
-        # Check if email exists
-        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
-        if response.data:
-            raise HTTPException(status_code=400, detail="Email already exists")
-        
-        # Validate password
-        is_valid, error_message = validate_password(data.password)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_message)
-        
-        # Check if passwords match
-        if data.password != data.confirm_password:
-            raise HTTPException(status_code=400, detail="Passwords do not match")
-        
-        # Generate hash and unique ID
-        hashed_password = create_hash(data.password)
-        unique_id = str(uuid.uuid4())
-        
-        # Generate verification code
-        verification_code = generate_verification_code()
-        
-        # Store in registration cache
-        registration_cache[verification_code] = {
-            "email": data.email,
-            "password": hashed_password,
-            "unique_id": unique_id,
-            "is_verified": False
-        }
-        
-        # Send verification email
-        if not send_verification_email(data.email, verification_code):
-            raise HTTPException(status_code=500, detail="Failed to send verification email")
-        
-        return StandardResponse(
-            status="pending_verification",
-            message="Please check your email for verification code"
-        )
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        print(f"Signup error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to create account")
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if response.data:
+        raise HTTPException(status_code=400, detail="Email already exists")
+    
+    is_valid, error_message = validate_password(data.password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_message)
+    
+    if data.password != data.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    
+    # Modified password hashing
+    hashed_password = bcrypt.hash(data.password)
+    unique_id = str(uuid.uuid4())
+    verification_code = generate_verification_code()
+    
+    registration_cache[verification_code] = {
+        "email": data.email,
+        "hashed_password": hashed_password,
+        "unique_id": unique_id,
+        "is_verified": False
+    }
+    
+    if not send_verification_email(data.email, verification_code):
+        raise HTTPException(status_code=500, detail="Failed to send verification email")
+    
+    return StandardResponse(
+        status="pending_verification",
+        message="Please check your email for verification code"
+    )
 def save_to_db(email, hashed_password, unique_id):
     data = {
         "unique_id": unique_id,
         "email": email,
-        "password": hashed_password  # Store the hashed password
+        "password": hashed_password
     }
     response = supabase.table("wardrobe").insert(data).execute()
     
     if response.data:
         print("Data successfully saved to Supabase.")
-        return True
     else:
-        print("Error inserting data into Supabase:", response)
-        return False
+        print("Error inserting data into Supabase:", response.json())
 # Authentication Endpoints Continued
 @app.post("/verify", response_model=StandardResponse)
 async def verify(data: VerificationRequest):
-    # Check if verification code exists in cache
     if data.verification_code not in registration_cache:
         raise HTTPException(status_code=400, detail="Invalid verification code")
 
     user_data = registration_cache[data.verification_code]
     try:
-        # Add a check to ensure email matches
-        if user_data["email"] != data.email:
-            raise HTTPException(status_code=400, detail="Email mismatch")
-
-        # Save to database using the password from cache
-        saved = save_to_db(
+        save_to_db(
             user_data["email"], 
-            user_data["password"],
+            user_data["hashed_password"], 
             user_data["unique_id"]
         )
-        
-        if not saved:
-            raise HTTPException(status_code=500, detail="Failed to save user data")
-
-        # Verify the data was actually saved by querying it
-        verify_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
-        if not verify_response.data:
-            raise HTTPException(status_code=500, detail="Data verification failed")
-
-        # Remove from cache only after confirming save
         del registration_cache[data.verification_code]
-        
         return StandardResponse(
             status="success",
             message="Account verified successfully",
-            data={
-                "email": data.email,
-                "password": data.password  # This will be used for auto-login
-            }
+            data={"email": data.email, "password": data.password}
         )
     except Exception as e:
-        print(f"Verification error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to verify account")
+        raise HTTPException(status_code=500, detail=f"Failed to register user: {str(e)}")
+
 @app.post("/login", response_model=StandardResponse)
 async def login(data: AuthBase):
+    # Fetch user data from the database
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    record = response.data[0]
+    stored_hash = record["password"]  # This should be the Argon2 hashed password stored in the database
+
     try:
-        # Get user record
-        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Email not found")
+        # Verify the password using Argon2
+        ph.verify(stored_hash, data.password)
 
-        record = response.data[0]
-        stored_password = record.get("password")  # Get the stored password hash
-
-        # If no password in record
-        if not stored_password:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        # Convert input password to hash and compare
-        if verify_password(stored_password, data.password):
-            return StandardResponse(
-                status="success",
-                message="Login successful. Redirecting to home."
-            )
-        else:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
+        return StandardResponse(
+            status="success",
+            message="Login successful. Redirecting to home."
+        )
+    except VerifyMismatchError:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    except InvalidHash:
+        raise HTTPException(status_code=500, detail="Password hash is invalid or corrupted")
     except Exception as e:
-        print(f"Login error: {str(e)}")
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        print(f"Password verification error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An error occurred during password verification")
 def clean_expired_codes():
     """Remove expired verification codes from cache"""
     current_time = datetime.now()
@@ -756,54 +697,39 @@ async def forgot_password(data: AuthBase):
         status="success",
         message="Verification code sent to your email"
     )
+
 @app.post("/reset-password", response_model=StandardResponse)
 async def reset_password(data: PasswordResetRequest):
-    try:
-        print(f"Received reset request for email: {data.email}")  # Debug log
-        clean_expired_codes()
-        
-        # Verify reset code exists and is valid
-        if data.reset_code not in forgot_password_cache:
-            print(f"Invalid reset code: {data.reset_code}")  # Debug log
-            raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+    clean_expired_codes()
+    if data.reset_code not in forgot_password_cache:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
-        stored_data = forgot_password_cache[data.reset_code]
-        if stored_data["email"] != data.email:
-            print(f"Email mismatch: {data.email} vs {stored_data['email']}")  # Debug log
-            raise HTTPException(status_code=400, detail="Email mismatch")
-        
-        if datetime.now() > stored_data["expiry"]:
-            del forgot_password_cache[data.reset_code]
-            raise HTTPException(status_code=400, detail="Code expired")
-
-        # Validate new password
-        is_valid, error_message = validate_password(data.new_password)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_message)
-
-        # Hash the new password using the same hashlib method
-        hashed_password = create_hash(data.new_password)
-        
-        # Update password in database
-        response = supabase.table("wardrobe").update({
-            "password": hashed_password
-        }).eq("email", data.email).execute()
-
-        if not response.data:
-            raise HTTPException(status_code=500, detail="Failed to update password")
-
-        # Clear the reset code from cache
+    stored_data = forgot_password_cache[data.reset_code]
+    if stored_data["email"] != data.email:
+        raise HTTPException(status_code=400, detail="Email mismatch")
+    
+    if datetime.now() > stored_data["expiry"]:
         del forgot_password_cache[data.reset_code]
-        
-        return StandardResponse(
-            status="success",
-            message="Password reset successfully"
-        )
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        print(f"Password reset error: {str(e)}")  # Debug log
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail="Code expired")
+
+    is_valid, error_message = validate_password(data.new_password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_message)
+
+    hashed_password = bcrypt.hash(data.new_password)
+    response = supabase.table("wardrobe").update({
+        "password": hashed_password
+    }).eq("email", data.email).execute()
+
+    if not response.data:
+        raise HTTPException(status_code=500, detail="Failed to update password")
+
+    del forgot_password_cache[data.reset_code]
+    return StandardResponse(
+        status="success",
+        message="Password reset successfully"
+    )
+
 @app.middleware("http")
 async def timeout_middleware(request, call_next):
     try:
