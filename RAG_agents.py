@@ -185,7 +185,15 @@ class FashionAssistant:
                     },
                 }
 
-                For "suggest" mode (when you are recommending something or giving suggestions):
+                For "suggest" mode it will happen if you are recommending something or
+                - Direct purchase requests
+                - Missing wardrobe essentials
+                - Incomplete outfit components
+                - Occasion-specific needs
+                - Seasonal requirements
+
+                
+                :
                 {
                     "text": "Your styling advice and explanation", 
                     "value": [
@@ -527,7 +535,7 @@ class FashionAssistant:
             try:
                 cleaned_json = clean_json_string(response_text)
                 response = json.loads(cleaned_json)
-                
+                print(f"Response: {response}", "response printing", "process_user_input")
                 # Store the conversation flow
                 self.conversation_context[thread_key].append(f"User: {state['user_query']}")
                 self.conversation_context[thread_key].append(f"Assistant: {response['text']}")
@@ -751,14 +759,18 @@ class FashionAssistant:
             
             # print(wardrobe_info, "wardrobe_info printing")
             context_message = f"""You are {state['stylist_id'].capitalize()}. 
+
             Available Wardrobe Items:
             {wardrobe_info}
+
             User Query: {state['user_query']}
 
-            Respond with a JSON containing:
+            IMPORTANT: You must include the exact token IDs of wardrobe items in your response's "value" array.
+
+            Respond with JSON:
             {{
-                "text": "your styling advice, no token names here in the text. Just the styling advice",
-                "value": ["token_name1", "token_name2"],
+                "text": "styling advice",
+                "value": ["EXACT_TOKEN_ID_1", "EXACT_TOKEN_ID_2"],  # Must contain actual token IDs from wardrobe
                 "needs_info": "suggest",
                 "context": {{
                     "understood": ["what you understood"],
@@ -767,8 +779,8 @@ class FashionAssistant:
                 }},
                 "recommendations": {{
                     "category_suggestions": {{
-                        "category1": "detailed suggestion",
-                        "category2": "detailed suggestion"
+                        "category1": "suggestion",
+                        "category2": "suggestion"
                     }}
                 }}
             }}"""

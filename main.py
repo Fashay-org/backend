@@ -831,7 +831,7 @@ async def handle_chat(data: ChatRequest):
         stored_hash = record["password"]
         
         print("Step 3: Verifying password")
-        if not bcrypt.verify(data.password, stored_hash):
+        if not verify_password(stored_hash, data.password):
             raise HTTPException(status_code=401, detail="Invalid password")
 
         unique_id = record["unique_id"]
@@ -1406,7 +1406,8 @@ async def update_preference(data: OutfitPreference):
         record = user_response.data[0]
         stored_hash = record["password"]
         
-        if not bcrypt.verify(data.password, stored_hash):
+        # Replace with
+        if not verify_password(stored_hash, data.password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Verify preference value
@@ -1441,7 +1442,7 @@ async def save_outfit(data: SaveOutfit):
         record = user_response.data[0]
         stored_hash = record["password"]
         
-        if not bcrypt.verify(data.password, stored_hash):
+        if not verify_password(stored_hash, data.password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Update outfit data
@@ -1481,7 +1482,7 @@ async def get_saved_outfits(unique_id: str, data: AuthBase):
         record = user_response.data[0]
         stored_hash = record["password"]
         
-        if not bcrypt.verify(data.password, stored_hash):
+        if not verify_password(stored_hash, data.password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Get saved outfits
