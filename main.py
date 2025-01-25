@@ -883,6 +883,7 @@ async def handle_chat(data: ChatRequest):
 
         print("Step 7: Processing images")
         images = []
+        print(parsed_result, "parsed_result")
         value_items = parsed_result.get("value", [])
         if value_items and isinstance(value_items, list):
             product_ids = set()

@@ -431,7 +431,7 @@ class ProductRecommender:
             print(f"Error fetching product images: {str(e)}")
             return {}
 
-    async def process_query(self, user_id: str, stylist_id: str, query: str) -> Dict[str, Any]:
+    async def process_query(self, user_id: str, stylist_id: str, query: str, selected_item: Dict = None) -> Dict[str, Any]:
         """Main function to process user query and return recommendations"""
         try:
             # Get user profile
@@ -441,15 +441,18 @@ class ProductRecommender:
             
             # Get user gender
             user_gender = profile.get('gender', None)
-            
+            selected_item_text = (f"ID: {selected_item['token_name']} | Caption: {selected_item['caption']}" if selected_item else 'None')
+            enhanced_query = query if not selected_item else f"Find items that coordinate with: {selected_item_text}. Context: {query}"
             print("getting gpt recommendations")
             # Get initial category-based GPT recommendations
+            print("enhanced_query", enhanced_query)
             category_suggestions = self.get_gpt_recommendations(
-                query=query,
+                query=enhanced_query,
                 profile=profile,
                 user_id=user_id,
                 stylist_id=stylist_id  # This will use the same thread as FashionAssistant
             )
+            print("completed gpt recommendations", category_suggestions)
             if not category_suggestions:
                 return {"error": "Failed to generate GPT recommendations"}
             
@@ -471,7 +474,7 @@ class ProductRecommender:
                 user_id,
                 stylist_id
             )
-
+            print(final_recommendations, "final_recommendations")
             # Get product images
             product_ids = [prod['product_id'] for prod in category_products.values()]
             product_images = await self.get_product_images(product_ids)
@@ -498,14 +501,17 @@ class ProductRecommender:
                         'description': product.get('description', '')
                     })
             
-
+            wardrobe_items = []
+            if selected_item:
+                wardrobe_items.append(selected_item['token_name'])
             
             return {
                 "success": True,
                 "category_suggestions": category_suggestions,
                 "final_recommendation": final_recommendations,
                 "products": products_output,
-                "user_gender": user_gender
+                "user_gender": user_gender,
+                "value": wardrobe_items
             }
                 
         except Exception as e:

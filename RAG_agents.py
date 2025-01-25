@@ -186,14 +186,11 @@ class FashionAssistant:
                 }
 
                 For "suggest" mode it will happen if you are recommending something or
-                - Direct purchase requests
-                - Missing wardrobe essentials
-                - Incomplete outfit components
-                - Occasion-specific needs
-                - Seasonal requirements
-
-                
-                :
+                - Getting direct purchase requests from the user, or
+                - There are missing wardrobe essentials that are required to complete the outfit, or
+                - Incomplete outfit components, or
+                - Occasion-specific needs, or
+                - Seasonal requirements:
                 {
                     "text": "Your styling advice and explanation", 
                     "value": [
@@ -409,6 +406,14 @@ class FashionAssistant:
                             # Handle string ID format
                             value_items.append(item)
                 
+                # Add target item if selected
+                if state.get("image_id") and state.get("image_id") != "general_chat":
+                    target_item = next(
+                        (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
+                        None
+                    )
+                    if target_item:
+                        value_items.append(target_item["token_name"])
                 # Create formatted response
                 formatted_response = {
                     "text": response.get("text", ""),
@@ -446,6 +451,7 @@ class FashionAssistant:
                         
                         formatted_response["recommendations"]["products"].append(formatted_product)
                 
+                print(formatted_response, "formatted_response printing", "format_product_response")
                 return {
                     "messages": state["messages"],
                     "response": json.dumps(formatted_response)
@@ -478,11 +484,20 @@ class FashionAssistant:
             if thread_key not in self.conversation_context:
                 self.conversation_context[thread_key] = []
         
+            selected_item = None
+            if state["image_id"] and state["image_id"] != "general_chat":
+                selected_item = next(
+                    (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
+                    None
+                )
+            selected_item_text = (f"ID: {selected_item['token_name']} | Caption: {selected_item['caption']}" if selected_item else 'None')
+            
             # Create the system and user message
             context_message = f"""
             Previous Conversation:
             {chr(10).join(self.conversation_context[thread_key]) if self.conversation_context[thread_key] else "No previous conversation"}
 
+            {f'Selected Item: {selected_item_text}' if selected_item else 'No selected item'}
             Current User Query: {state['user_query']}
 
             Follow your chain of thought process. Begin with foundational analysis and style profile building.
@@ -613,6 +628,12 @@ class FashionAssistant:
     async def check_recommendation_need(self, state: State) -> Dict[str, Any]:
         """Determine if external product recommendations are needed"""
         try:
+            selected_item = None
+            if state["image_id"] and state["image_id"] != "general_chat":
+                selected_item = next(
+                    (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
+                    None
+                )
             # Check if we have a direct response case (no recommendations needed)
             try:
                 response = json.loads(state.get("response", "{}"))
@@ -632,20 +653,20 @@ class FashionAssistant:
             except (json.JSONDecodeError, KeyError):
                 pass
             # First check if wardrobe is empty
-            if not state["wardrobe_data"]:
-                return {
-                    **state,
-                    "needs_recommendations": True,
-                    "shopping_analysis": {
-                        "needs_shopping": True,
-                        "confidence": 1.0,
-                        "reasoning": "No items in wardrobe, recommendations needed",
-                        "categories": []
-                    }
-                }
+            # if not state["wardrobe_data"]:
+            #     return {
+            #         **state,
+            #         "needs_recommendations": True,
+            #         "shopping_analysis": {
+            #             "needs_shopping": True,
+            #             "confidence": 1.0,
+            #             "reasoning": "No items in wardrobe, recommendations needed",
+            #             "categories": []
+            #         }
+            #     }
             # Get or create thread
             thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
-
+            selected_item_text = (f"ID: {selected_item['token_name']} | Caption: {selected_item['caption']}" if selected_item else 'None')
             system_prompt = """You will be given user query and based on that determine if the user's query indicates 
             interest in getting recommendations from the wardrobe or recommendations for shopping for new items. Consider both explicit mentions and implicit intent.
             Return ONLY a JSON with this exact structure:
@@ -660,8 +681,8 @@ class FashionAssistant:
 
             wardrobe_info = "\n".join([f"- {item['caption']}" for item in state["wardrobe_data"]])
             user_context = f"""User Query: {state["user_query"]}
-            
-            Their Current Wardrobe Items:
+            Selected Item: {selected_item_text}
+            Available Wardrobe Items:
             {wardrobe_info}
             
             Analyze if they need new items or can be styled with existing wardrobe.
@@ -764,13 +785,15 @@ class FashionAssistant:
             {wardrobe_info}
 
             User Query: {state['user_query']}
+            Selected Item: {next((item['caption'] for item in state['wardrobe_data'] if item['token_name'] == state['image_id']), 'None')}
 
+            If selected item exists include its token ID in value array and suggest complementary pieces.
             IMPORTANT: You must include the exact token IDs of wardrobe items in your response's "value" array.
 
             Respond with JSON:
             {{
                 "text": "styling advice",
-                "value": ["EXACT_TOKEN_ID_1", "EXACT_TOKEN_ID_2"],  # Must contain actual token IDs from wardrobe
+                "value": ["EXACT_TOKEN_ID_1", "EXACT_TOKEN_ID_2", "COMPLEMENTARY_TOKEN_ID"],  # Must contain actual token IDs from wardrobe
                 "needs_info": "suggest",
                 "context": {{
                     "understood": ["what you understood"],
@@ -846,41 +869,38 @@ class FashionAssistant:
                 "response": json.dumps(error_response)
             }
 
+    # @traceable
     @traceable
     async def get_product_recommendations(self, state: State) -> Dict[str, Any]:
-        """Get product recommendations if needed"""
         try:
             if not state.get("needs_recommendations", False):
                 return state
 
-            enhanced_query = state["user_query"]
+            selected_item = None
             if state["image_id"] and state["image_id"] != "general_chat":
-                target_item = next(
+                selected_item = next(
                     (item for item in state["wardrobe_data"] if item["token_name"] == state["image_id"]),
                     None
                 )
-                if target_item:
-                    enhanced_query += f"\nPlease consider coordinating with: {target_item['caption']}"
 
             recommendations = await self.product_recommender.process_query(
                 user_id=state["unique_id"],
                 stylist_id=state["stylist_id"],
-                query=enhanced_query
+                query=state["user_query"],
+                selected_item=selected_item
             )
-            
-            print(recommendations, "recommendations printing")
-            # exit(-1)
+
             return {
                 **state,
                 "product_recommendations": recommendations
             }
-            
+
         except Exception as e:
             print(f"Error getting product recommendations: {str(e)}")
             error_response = {
                 "text": f"I encountered an error while finding product recommendations: {str(e)}",
                 "value": [],
-                "needs_info": "speak",  # Changed from False
+                "needs_info": "speak",
                 "context": {
                     "error": str(e),
                     "understood": ["product recommendation attempted"],
@@ -893,7 +913,6 @@ class FashionAssistant:
                 "product_recommendations": None,
                 "response": json.dumps(error_response)
             }
-
     @traceable
     async def generate_final_response(self, state: State) -> Dict[str, Any]:
         """Generate final response incorporating both wardrobe and product recommendations"""
