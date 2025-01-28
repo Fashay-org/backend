@@ -9,7 +9,6 @@ opencv_python_headless
 Pillow
 pydantic
 python-dotenv
-python-bcrypt
 scikit_learn
 starlette
 supabase
@@ -17,8 +16,7 @@ tenacity
 pydantic[email]
 uvicorn
 jinja2
-passlib[bcrypt]
 pinecone
 pinecone-plugin-inference
 pinecone-plugin-interface
-python-multipart  # Add this if not present
+python-multipart

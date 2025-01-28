@@ -316,7 +316,49 @@ class FashionAssistant:
             }
     def _get_thread_key(self, unique_id, stylist_id):
         return f"{unique_id}_{stylist_id}"
-
+    # Add this method to the FashionAssistant class:
+    async def reset_all_context(self, unique_id: str, stylist_id: str) -> str:
+        """Completely reset all conversation context and threads"""
+        try:
+            thread_key = self._get_thread_key(unique_id, stylist_id)
+            
+            # Clear all context storages
+            if thread_key in self.user_threads:
+                # Delete the existing thread in OpenAI
+                try:
+                    if self.user_threads[thread_key]:
+                        await self.client.beta.threads.delete(self.user_threads[thread_key])
+                except Exception as e:
+                    print(f"Error deleting thread: {str(e)}")
+                
+                # Remove from our storage
+                del self.user_threads[thread_key]
+                
+            # Clear other storages
+            if thread_key in self.last_interaction:
+                del self.last_interaction[thread_key]
+                
+            if thread_key in self.conversation_context:
+                del self.conversation_context[thread_key]
+            
+            # Create a fresh thread
+            new_thread = self.client.beta.threads.create()
+            self.user_threads[thread_key] = new_thread.id
+            self.last_interaction[thread_key] = time.time()
+            self.conversation_context[thread_key] = []  # Start with empty context
+            
+            # Return personalized greeting based on stylist
+            stylist_name = stylist_id.capitalize()
+            personality = self.stylist_personalities.get(
+                stylist_id.lower(),
+                "your personal fashion stylist"
+            )
+            
+            return f"Hello! I'm {stylist_name}, {personality.split(',')[0]}. How can I help you today?"
+            
+        except Exception as e:
+            print(f"Error in reset_all_context: {str(e)}")
+            raise Exception(f"Failed to reset context: {str(e)}")
     def _cleanup_old_threads(self, max_age_hours=24):
         current_time = time.time()
         threads_to_remove = []
@@ -356,13 +398,31 @@ class FashionAssistant:
         if thread_key in self.last_interaction:
             del self.last_interaction[thread_key]
         if thread_key in self.conversation_context:
-            self.conversation_context[thread_key] = []  # Reset to empty list
-                
+            del self.conversation_context[thread_key]
+        
+        # Create fresh thread
         thread = client.beta.threads.create()
         self.user_threads[thread_key] = thread.id
         self.last_interaction[thread_key] = time.time()
+        self.conversation_context[thread_key] = []
         
-        return "Hello! I'm your refreshed stylist. How can I help you today?"
+        # Get personality for personalized message
+        personality = self.stylist_personalities.get(
+            stylist_id.lower(),
+            "your refreshed AI fashion stylist"
+        )
+        
+        # Return formatted response
+        return json.dumps({
+            "text": f"Hello! I'm {stylist_id.capitalize()}, {personality.split(',')[0]}. How can I help you today?",
+            "value": [],
+            "needs_info": "speak",
+            "context": {
+                "understood": ["conversation reset"],
+                "missing": [],
+                "question": ""
+            }
+        })
     @traceable
     async def format_product_response(self, state: State) -> Dict[str, Any]:
         """Format the product recommendations response"""
@@ -652,32 +712,37 @@ class FashionAssistant:
                     }
             except (json.JSONDecodeError, KeyError):
                 pass
-            # First check if wardrobe is empty
-            # if not state["wardrobe_data"]:
-            #     return {
-            #         **state,
-            #         "needs_recommendations": True,
-            #         "shopping_analysis": {
-            #             "needs_shopping": True,
-            #             "confidence": 1.0,
-            #             "reasoning": "No items in wardrobe, recommendations needed",
-            #             "categories": []
-            #         }
-            #     }
-            # Get or create thread
+
             thread_id = self._get_or_create_thread(state["unique_id"], state["stylist_id"])
             selected_item_text = (f"ID: {selected_item['token_name']} | Caption: {selected_item['caption']}" if selected_item else 'None')
-            system_prompt = """You will be given user query and based on that determine if the user's query indicates 
-            interest in getting recommendations from the wardrobe or recommendations for shopping for new items. Consider both explicit mentions and implicit intent.
+            system_prompt = """The platform has two distinct modes: WARDROBE and SHOP. Analyze the user's query to determine which mode to use.
+
+            WARDROBE MODE:
+            - When user wants to style or combine their existing items
+            - When user mentions "my wardrobe", "my clothes", "what I have"
+            - When user wants outfit ideas with their current items
+            - When user wants to mix and match existing pieces
+
+            SHOP MODE:
+            - When user explicitly wants to buy new items
+            - When user mentions "shop", "buy", "purchase", "new"
+            - When user wants recommendations for items they don't have
+            - When user needs items that aren't in their wardrobe
+            - When user mentions "from outside" or "external"
+
             Return ONLY a JSON with this exact structure:
             {
-                "needs_shopping": boolean, 
-                "confidence": float,
-                "reasoning": "brief explanation",
-                "categories": ["category1", "category2"]
+                "needs_shopping": boolean,     // true for SHOP mode, false for WARDROBE mode
+                "confidence": float,           // between 0.0 and 1.0
+                "reasoning": "brief explanation of why this mode was chosen",
+                "categories": ["category1", "category2"]   // shopping categories if needed
             }
-            if user wants recommendations for shopping for new items, return "needs_shopping": true, otherwise return "needs_shopping": false.
-            """
+
+            Example queries and their modes:
+            - "Style these jeans with something from my wardrobe" → WARDROBE mode (needs_shopping: false)
+            - "I need new shoes to go with this" → SHOP mode (needs_shopping: true)
+            - "Show me what I can wear with this" → WARDROBE mode (needs_shopping: false)
+            - "Recommend some dresses to buy" → SHOP mode (needs_shopping: true)"""
 
             wardrobe_info = "\n".join([f"- {item['caption']}" for item in state["wardrobe_data"]])
             user_context = f"""User Query: {state["user_query"]}

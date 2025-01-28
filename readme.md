@@ -132,3 +132,17 @@ Monitor EC2 disk space
 Keep Docker images updated
 Regular security group audits
 Check application logs for issues
+
+
+
+
+Rebuild or make local changes
+# Local - build and push
+docker build -t fashay-app:latest -f backend/Dockerfile .
+docker tag fashay-app:latest 571600837748.dkr.ecr.us-east-1.amazonaws.com/fashay-app:latest
+docker push 571600837748.dkr.ecr.us-east-1.amazonaws.com/fashay-app:latest
+
+# EC2
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 571600837748.dkr.ecr.us-east-1.amazonaws.com
+docker pull 571600837748.dkr.ecr.us-east-1.amazonaws.com/fashay-app:latest
+docker run -it -p 8000:8000 --env-file .env --workdir /app/backend/ 571600837748.dkr.ecr.us-east-1.amazonaws.com/fashay-app:latest

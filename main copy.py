@@ -644,29 +644,24 @@ async def verify(data: VerificationRequest):
 
 @app.post("/login", response_model=StandardResponse)
 async def login(data: AuthBase):
-    # Fetch user data from the database
     response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="Email not found")
 
     record = response.data[0]
-    stored_hash = record["password"]  # This should be the Argon2 hashed password stored in the database
+    stored_hash = record["password"]  # No need to encode, passlib handles this
 
     try:
-        # Verify the password using Argon2
-        ph.verify(stored_hash, data.password)
+        if not bcrypt.verify(data.password, stored_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
 
         return StandardResponse(
             status="success",
             message="Login successful. Redirecting to home."
         )
-    except VerifyMismatchError:
-        raise HTTPException(status_code=401, detail="Invalid password")
-    except InvalidHash:
-        raise HTTPException(status_code=500, detail="Password hash is invalid or corrupted")
     except Exception as e:
         print(f"Password verification error: {str(e)}")
-        raise HTTPException(status_code=500, detail="An error occurred during password verification")
+        raise HTTPException(status_code=401, detail="Invalid password")
 def clean_expired_codes():
     """Remove expired verification codes from cache"""
     current_time = datetime.now()

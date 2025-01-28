@@ -115,11 +115,18 @@ forgot_password_cache = {}
 
 
 
+
+
+class AuthBase(BaseModel):
+    email: EmailStr
+    password: str
 class CurrencyType(str, Enum):
     USD = "USD"
     EUR = "EUR"
     GBP = "GBP"
 
+class RefreshRequest(AuthBase):
+    stylist: str
 class ProductBase(BaseModel):
     id: uuid.UUID
     url: str
@@ -145,11 +152,6 @@ class AmazonProduct(ProductBase):
 class ProductResponse(BaseModel):
     status: str
     data: dict
-
-class AuthBase(BaseModel):
-    email: EmailStr
-    password: str
-
 class ProfilePictureResponse(BaseModel):
     status: str
     message: str
@@ -1286,19 +1288,20 @@ async def get_gender(email: str):
 # Stylist Management Endpoint
 @app.post("/refresh_stylist", response_model=StandardResponse)
 @traceable
-async def refresh_stylist(data: ChatRequest):
-    # Verify credentials
-    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
-    if not response.data:
-        raise HTTPException(status_code=404, detail="Email not found")
-    
-    record = response.data[0]
-    unique_id = record["unique_id"]
-    
+async def refresh_stylist(data: RefreshRequest):
     try:
+        # Verify credentials
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        record = response.data[0]
+        unique_id = record["unique_id"]
+        
+        # Get and reset the assistant
         fashion_assistant = get_or_create_assistant(data.stylist.lower())
         intro_message = fashion_assistant.reset_conversation(unique_id, data.stylist.lower())
-        
+        print(f"Refreshed stylist: {intro_message}")
         return StandardResponse(
             status="success",
             message="Stylist refreshed successfully",
@@ -1306,7 +1309,9 @@ async def refresh_stylist(data: ChatRequest):
         )
         
     except Exception as e:
+        print(f"Error in refresh_stylist: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to refresh stylist: {str(e)}")
+
 
 # Profile Picture Management
 class ProfilePictureResponse(BaseModel):
