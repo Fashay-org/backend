@@ -156,7 +156,7 @@ class FashionAssistant:
                 - Boundaries
 
                 3. Response Types:
-                You must respond with one of three modes using the needs_info field:
+                You must respond with one of three modes using the action_to_take field:
                 - "ask": When you need more information from the user
                 - "speak": When you just need to communicate something without recommendations
                 - "suggest": When you're ready to provide product suggestions
@@ -166,7 +166,7 @@ class FashionAssistant:
                 {
                     "text": "Your question to the user must be present here", // ask only 1 question at a time
                     "value": [], // Referenced items
-                    "needs_info": "ask",
+                    "action_to_take": "ask",
                     "context": {
                         "understood": ["what you know"],
                         "missing": ["what you need"],
@@ -177,7 +177,7 @@ class FashionAssistant:
                 {
                     "text":  "Here is your message to the user, explain everything in detail. No need to ask questions or give recommendations.",
                     "value": [], // Referenced items
-                    "needs_info": "speak",
+                    "action_to_take": "speak",
                     "context": {
                         "understood": ["what you know"],
                         "missing": [],
@@ -197,13 +197,13 @@ class FashionAssistant:
                     token name 1,
                     token name 2
                     ], //for recommendations from within the wardrobe.
-                    "needs_info": "suggest",
+                    "action_to_take": "suggest",
                     "context": {
                         "understood": ["what you know"],
                         "missing": ["what you need"],
                         "question": "your question if asking" // Empty string if not asking
                     },
-                    "recommendations": {  // Only include when needs_info = "suggest"
+                    "recommendations": {  // Only include when action_to_take = "suggest"
                         "category_suggestions": {
                             "category 1": "detailed category 1 description",
                             "category 2": "detailed category 2 description",
@@ -224,7 +224,7 @@ class FashionAssistant:
                 {
                     "text": "Questions that help understand user style preferences like what are your stylistic inspirations?", //don't use the same question
                     "value": [],
-                    "needs_info": "ask",
+                    "action_to_take": "ask",
                     "context": {
                         "understood": ["needs outfit recommendation"],
                         "missing": ["occasion", "style preferences"],
@@ -236,7 +236,7 @@ class FashionAssistant:
                 {
                     "text": "The reason for choosing the white blouse is that it is simple and elegant.",
                     "value": [],
-                    "needs_info": "speak",
+                    "action_to_take": "speak",
                     "context": {
                         "understood": ["wants casual outfit"],
                         "missing": [],
@@ -251,7 +251,7 @@ class FashionAssistant:
                     token name 1,
                     token name 2
                     ],
-                    "needs_info": "suggest",
+                    "action_to_take": "suggest",
                     "context": {
                         "understood": ["business meeting", "formal setting"],
                         "missing": [],
@@ -274,7 +274,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I apologize, but I encountered an error initializing the fashion assistant: {str(e)}",
                 "value": [],
-                "needs_info": "speak",  # Changed from False
+                "action_to_take": "speak",  # Changed from False
                 "context": {
                     "error": str(e),
                     "understood": ["assistant creation attempted"],
@@ -289,7 +289,7 @@ class FashionAssistant:
         try:
             if state.get("response"):
                 response = json.loads(state.get("response"))
-                return response.get("needs_info") == "ask"
+                return response.get("action_to_take") == "ask"
             return False
         except:
             return False
@@ -308,7 +308,7 @@ class FashionAssistant:
             error_response = {
                 "text": "I apologize, but I encountered an error processing your request.",
                 "value": [],
-                "needs_info": False
+                "action_to_take": False
             }
             return {
                 "messages": state.get("messages", []),
@@ -416,7 +416,7 @@ class FashionAssistant:
         return json.dumps({
             "text": f"Hello! I'm {stylist_id.capitalize()}, {personality.split(',')[0]}. How can I help you today?",
             "value": [],
-            "needs_info": "speak",
+            "action_to_take": "speak",
             "context": {
                 "understood": ["conversation reset"],
                 "missing": [],
@@ -431,19 +431,19 @@ class FashionAssistant:
             recommendations = state.get("product_recommendations", {}) or {}
             
             # Handle speak/ask modes
-            if response.get("needs_info") in ["speak", "ask"]:
+            if response.get("action_to_take") in ["speak", "ask"]:
                 return {
                     "messages": state["messages"],
                     "response": json.dumps({
                         "text": response.get("text", ""),
                         "value": response.get("value", []),  # Preserve value array for wardrobe items
-                        "needs_info": response.get("needs_info"),
+                        "action_to_take": response.get("action_to_take"),
                         "context": response.get("context", {})
                     })
                 }
             
             # Handle suggest mode
-            if response.get("needs_info") == "suggest":
+            if response.get("action_to_take") == "suggest":
                 # Get category suggestions
                 category_suggestions = {}
                 if isinstance(recommendations, dict):
@@ -478,7 +478,7 @@ class FashionAssistant:
                 formatted_response = {
                     "text": response.get("text", ""),
                     "value": value_items,  # Include wardrobe item references
-                    "needs_info": "suggest",
+                    "action_to_take": "suggest",
                     "context": response.get("context", {}),
                     "recommendations": {
                         "category_suggestions": category_suggestions,
@@ -522,7 +522,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I apologize, but I encountered an error formatting the recommendations: {str(e)}",
                 "value": [],
-                "needs_info": "speak",
+                "action_to_take": "speak",
                 "context": {
                     "error": str(e),
                     "understood": ["formatting attempted"],
@@ -631,7 +631,7 @@ class FashionAssistant:
                 error_response = {
                     "text": "I apologize, but I encountered an error processing your request.",
                     "value": [],
-                    "needs_info": "speak",
+                    "action_to_take": "speak",
                     "context": {
                         "error": str(e),
                         "understood": [],
@@ -650,7 +650,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I apologize, but I encountered an error: {str(e)}",
                 "value": [],
-                "needs_info": "speak",
+                "action_to_take": "speak",
                 "context": {
                     "error": str(e),
                     "understood": [],
@@ -663,25 +663,6 @@ class FashionAssistant:
                 "response": json.dumps(error_response),
                 "user_query": state['user_query']
             }
-        # except json.JSONDecodeError as e:
-        #     print(f"Failed to parse response: {response_text}")
-        #     print(f"JSON error: {str(e)}")
-        #     error_response = {
-        #         "text": "I apologize, but I encountered an error processing your request.",
-        #         "value": [],
-        #         "needs_info": "speak",  # Changed from False
-        #         "context": {
-        #             "error": str(e),
-        #             "understood": [],
-        #             "missing": [],
-        #             "question": ""
-        #         }
-        #     }
-        #     return {
-        #         "messages": state.get("messages", []),
-        #         "response": json.dumps(error_response),
-        #         "user_query": state['user_query']
-        #     }
 
 
     @traceable
@@ -699,7 +680,7 @@ class FashionAssistant:
                 response = json.loads(state.get("response", "{}"))
 
                 # If it's a speak mode response, don't get recommendations
-                if response.get("needs_info") == "speak":
+                if response.get("action_to_take") == "speak":
                     return {
                         **state,
                         "needs_recommendations": False,
@@ -797,7 +778,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I encountered an error analyzing shopping needs: {str(e)}",
                 "value": [],
-                "needs_info": "speak",  # Changed from True
+                "action_to_take": "speak",  # Changed from True
                 "context": {
                     "error": str(e),
                     "understood": ["error occurred"],
@@ -823,9 +804,9 @@ class FashionAssistant:
             # print(state, "state printing")
             response = json.loads(state.get("response", "{}"))
             # Check if we need product suggestions
-            if response.get("needs_info") == "suggest":
+            if response.get("action_to_take") == "suggest":
                 return True
-            # If it's speak mode or no specific needs_info, go to wardrobe response
+            # If it's speak mode or no specific action_to_take, go to wardrobe response
             return False
         except (json.JSONDecodeError, KeyError):
             return False
@@ -859,7 +840,7 @@ class FashionAssistant:
             {{
                 "text": "styling advice",
                 "value": ["EXACT_TOKEN_ID_1", "EXACT_TOKEN_ID_2", "COMPLEMENTARY_TOKEN_ID"],  # Must contain actual token IDs from wardrobe
-                "needs_info": "suggest",
+                "action_to_take": "suggest",
                 "context": {{
                     "understood": ["what you understood"],
                     "missing": [],
@@ -901,8 +882,8 @@ class FashionAssistant:
             
             # Ensure proper format
             print(wardrobe_response, "111111wardrobe_response printing")
-            if "needs_info" not in wardrobe_response:
-                wardrobe_response["needs_info"] = "suggest"
+            if "action_to_take" not in wardrobe_response:
+                wardrobe_response["action_to_take"] = "suggest"
             if "recommendations" not in wardrobe_response:
                 wardrobe_response["recommendations"] = {
                     "category_suggestions": {}
@@ -920,7 +901,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I apologize, but I encountered an error generating wardrobe advice: {str(e)}",
                 "value": [],
-                "needs_info": "speak",  # Changed from False
+                "action_to_take": "speak",  # Changed from False
                 "context": {
                     "error": str(e),
                     "understood": ["wardrobe analysis attempted"],
@@ -965,7 +946,7 @@ class FashionAssistant:
             error_response = {
                 "text": f"I encountered an error while finding product recommendations: {str(e)}",
                 "value": [],
-                "needs_info": "speak",
+                "action_to_take": "speak",
                 "context": {
                     "error": str(e),
                     "understood": ["product recommendation attempted"],
@@ -1056,7 +1037,7 @@ f"\n- {product['category'].upper()}:"
             error_response = {
                 "text": f"I apologize, but I encountered an error generating the final response: {str(e)}",
                 "value": [],
-                "needs_info": "speak",  # Changed from False
+                "action_to_take": "speak",  # Changed from False
                 "context": {
                     "error": str(e),
                     "understood": ["final response generation attempted"],
