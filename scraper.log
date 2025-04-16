@@ -1,0 +1,8 @@
+2024-12-27 20:13:54,901 - INFO - [asos_women_scraper.py:115] - Successfully scraped product: ASOS DESIGN Curve lounge borg sweat & wide leg pants set in gray
+2024-12-27 20:13:54,913 - INFO - [asos_women_scraper.py:187] - Data saved successfully to results/product_137514974.json
+2024-12-27 20:14:14,646 - INFO - [asos_women_scraper.py:115] - Successfully scraped product: ASOS DESIGN Curve lounge borg sweat & wide leg pants set in gray
+2024-12-27 20:14:14,647 - INFO - [asos_women_scraper.py:187] - Data saved successfully to results/product_137514974.json
+2024-12-27 20:14:35,467 - INFO - [asos_women_scraper.py:115] - Successfully scraped product: ASOS DESIGN Curve lounge borg sweat & wide leg pants set in gray
+2024-12-27 20:14:35,468 - INFO - [asos_women_scraper.py:187] - Data saved successfully to results/product_137514974.json
+2024-12-27 20:19:17,046 - ERROR - [asos_women_scraper.py:65] - Error making request to https://www.asos.com/us/women/curve-plus-size/cat/?cid=9577?page=1: 422 Client Error: Unprocessable Entity for url: https://www.asos.com/us/women/curve-plus-size/cat/?cid=9577?page=1
+2024-12-27 20:19:17,046 - ERROR - [asos_women_scraper.py:223] - Failed to scrape product data

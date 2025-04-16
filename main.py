@@ -1,110 +1,733 @@
-from fastapi import FastAPI, Form, UploadFile, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
-import os
-import bcrypt
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
-import json
-from langsmith import Client
-import functools
-import base64
-from PIL import Image
-from RAG_agents import FashionAssistant
-import uuid
-import openai
+from fastapi import FastAPI, Query, HTTPException
+from pydantic import BaseModel, EmailStr, validator
+from typing import List, Dict, Optional, Union
+from datetime import datetime, timedelta
 from langsmith.wrappers import wrap_openai
-from langsmith import traceable
-# from process import generate_mask
-from io import BytesIO
-from openai import OpenAI
-from dotenv import load_dotenv
-from supabase import create_client, Client
-import os
 import base64
-import smtplib
+import tempfile
+from langsmith import traceable
+from openai import OpenAI
+from PIL import Image
+from io import BytesIO
+from fastapi import FastAPI, HTTPException, Request
+from typing import Optional
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import random
-import string
+from supabase import create_client, Client
+from auth_utils import hash_password, verify_password
+import json
+import asyncio
+from starlette.responses import JSONResponse
+import os
+import uuid
+import time
+from enum import Enum
+from decimal import Decimal
+import base64
+import smtplib
 import re
+from fastapi import FastAPI
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import JSONResponse
+import asyncio
 import secrets
-from datetime import datetime, timedelta
+from RAG_agents import chat_with_stylist, get_or_create_assistant
+from dotenv import load_dotenv
+import hashlib
+import base64
+
+def create_hash(password: str) -> str:
+    """Create a simple but secure hash of the password."""
+    # Convert password to bytes and create SHA-256 hash
+    password_bytes = password.encode('utf-8')
+    hash_obj = hashlib.sha256(password_bytes)
+    # Convert hash to base64 string for storage
+    return base64.b64encode(hash_obj.digest()).decode('utf-8')
+
+def verify_password(stored_hash: str, provided_password: str) -> bool:
+    """Verify if the provided password matches the stored hash."""
+    try:
+        # Create hash of provided password
+        provided_hash = create_hash(provided_password)
+        # Compare hashes
+        return provided_hash == stored_hash
+    except Exception as e:
+        print(f"Verification error: {str(e)}")
+        return False
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            # Set to 28 seconds to be just under Heroku's 30-second limit
+            return await asyncio.wait_for(call_next(request), timeout=28)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504, 
+                detail="Request processing time exceeded 28 seconds"
+            )
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# app.add_middleware(TimeoutMiddleware)
+
+# Load environment variables
 load_dotenv()
 supabase_url = os.environ.get("SUPABASE_URL")
-supabase_key = os.environ.get("SUPABASE_KEY")  # anon key
+supabase_key = os.environ.get("SUPABASE_KEY")
 supabase_service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-# Public client for regular operations
+# Initialize Supabase clients
 supabase: Client = create_client(supabase_url, supabase_key)
-
-# Admin client for storage operations
 supabase_admin: Client = create_client(supabase_url, supabase_service_key)
 
+# Initialize OpenAI client
+openai_client = wrap_openai(OpenAI(api_key=os.environ.get("OPENAI_API_KEY2")))
 
-
+# Configure LangSmith
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGSMITH_API_KEY"] = os.environ.get("LANGSMITH_API_KEY")  # If this is how it's named in your .env
+os.environ["LANGSMITH_API_KEY"] = os.environ.get("LANGSMITH_API_KEY")
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_PROJECT"] = "fashay"
 
-print(os.environ.get("OPENAI_API_KEY2"), "OPENAI_API_KEY2")
-openai_client = wrap_openai(OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY2"),
-))
-# Cache to store registration information temporarily
-registration_cache = {}
+# FastAPI setup
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+TEMPLATES_DIR = os.path.join(FRONTEND_DIR, "templates")
+STATIC_DIR = os.path.join(FRONTEND_DIR, "static")
 
-# Initialize FashionAssistant
-fashion_assistant = FashionAssistant()
-# Add this to store temporary verification data
+# Setup templates and static files
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Cache storages
+registration_cache = {}
 forgot_password_cache = {}
 
+
+
+
+
+class AuthBase(BaseModel):
+    email: EmailStr
+    password: str
+class CurrencyType(str, Enum):
+    USD = "USD"
+    EUR = "EUR"
+    GBP = "GBP"
+
+class RefreshRequest(AuthBase):
+    stylist: str
+class ProductBase(BaseModel):
+    id: uuid.UUID
+    url: str
+    name: str
+    brand: str
+    price: Decimal
+    currency: CurrencyType
+    colors: List[str]
+    image_urls: List[str]
+    category: str
+    additional_notes: Optional[str]
+    gender: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+class HMProduct(ProductBase):
+    sku: str
+
+class AmazonProduct(ProductBase):
+    asin: str
+    sizes: List[str]
+
+class ProductResponse(BaseModel):
+    status: str
+    data: dict
+class ProfilePictureResponse(BaseModel):
+    status: str
+    message: str
+    url: Optional[str]
+
+# New request model for the profile picture upload
+class ProfilePictureRequest(BaseModel):
+    email: str
+    password: str
+    image_data: str  # base64 string
+    filename: str
+    content_type: str
+
+class SignupRequest(AuthBase):
+    confirm_password: str
+
+class VerificationRequest(AuthBase):
+    verification_code: str
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+    password: str  # Required by AuthBase
+    reset_code: str
+    new_password: str
+
+class UserProfileData(AuthBase):
+    favorite_styles: List[str]
+    favorite_colors: List[str]
+    size_preferences: Dict[str, str]
+    budget_range: str
+    favorite_materials: List[str]
+    body_shape_info: Optional[str] = None
+    style_determined_1: Optional[str] = None
+    style_determined_2: Optional[str] = None
+    style_determined_3: Optional[str] = None
+    style_determined_4: Optional[str] = None
+    style_determined_5: Optional[str] = None
+
+class StyleResponse(BaseModel):
+    unique_id: str
+    stylist_id: str
+    user_query: str
+    stylist_response: str
+    outfit_image_ids: Optional[List[str]] = None
+    style_category: Optional[str] = None
+    is_saved: bool = False
+    preference: Optional[str] = None
+
+class OutfitPreference(AuthBase):
+    response_id: int
+    preference: str  # LIKE or DISLIKE
+
+class SaveOutfit(AuthBase):
+    response_id: int
+    outfit_image_ids: List[str]
+    style_category: str
+
+class ChatRequest(AuthBase):
+    input_text: str
+    token_name: str
+    stylist: str
+
+class ImageRequest(AuthBase):
+    token_name: str
+
+class GenderUpdateRequest(AuthBase):
+    gender: str
+
+# Response Models
+class StandardResponse(BaseModel):
+    status: str
+    message: str
+    data: Optional[Dict] = None
+
+class ProductRecommendation(BaseModel):
+    category: str
+    product_id: str
+    price: float
+    product_text: str
+    retailer: str
+    brand: str
+    similarity_score: float
+    image_urls: List[str]
+    url: str
+    suggestion: str
+    gender: str
+    styling_tips: Optional[List[str]] = None
+class Recommendations(BaseModel):
+    category_suggestions: Dict[str, str]
+    products: List[ProductRecommendation]
+
+class WardrobeImage(BaseModel):
+    image_id: str
+    image_url: str
+    token_name: str
+class ChatResponse(BaseModel):
+    reply: str
+    images: List[WardrobeImage]
+    recommendations: Optional[Recommendations] = None
+    shopping_analysis: Optional[Dict[str, Union[bool, float, str, List[str]]]] = None
+
+
+class ProfileResponse(BaseModel):
+    status: str
+    data: Dict
+    message: Optional[str] = None
+
+# Helper Functions
 def generate_verification_code() -> str:
-    """Generate a 6-digit verification code"""
     return ''.join(secrets.choice('0123456789') for _ in range(6))
 
-def send_forgot_password_email(email: str, code: str) -> bool:
-    """
-    Send password reset verification code via email
-    Returns True if email was sent successfully, False otherwise
-    """
+def validate_password(password: str) -> tuple[bool, str]:
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+    if not re.search(r'[A-Z]', password):
+        return False, "Password must contain at least one uppercase letter"
+    if not re.search(r'[a-z]', password):
+        return False, "Password must contain at least one lowercase letter"
+    if not re.search(r'[0-9]', password):
+        return False, "Password must contain at least one number"
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False, "Password must contain at least one special character"
+    return True, ""
+
+# @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
+async def async_generate_with_retry(*args, **kwargs):
+    return await chat_with_stylist(*args, **kwargs)
+
+# Email Functions
+def send_verification_email(email: str, code: str) -> bool:
     try:
         sender_email = "fashay.contact@gmail.com"
         sender_password = os.environ.get("EMAIL_PASSWORD")
-
         message = MIMEMultipart()
         message["From"] = sender_email
         message["To"] = email
-        message["Subject"] = "Fashay - Password Reset Code"
-
-        body = f"""
-        Hello,
-
-        You have requested to reset your password for your Fashay account.
-        Your verification code is: {code}
-
-        This code will expire in 30 minutes.
-        If you did not request this password reset, please ignore this email.
-
-        Best regards,
-        The Fashay Team
-        """
+        message["Subject"] = "Email Verification Code"
+        body = f"Your verification code is: {code}"
         message.attach(MIMEText(body, "plain"))
-
+        
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(sender_email, sender_password)
             server.send_message(message)
-            
         return True
     except Exception as e:
-        print(f"Error sending forgot password email: {str(e)}")
+        print(f"Error sending email: {str(e)}")
         return False
 
+
+
+
+
+
+@app.get("/products", response_model=ProductResponse)
+async def get_all_products(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=40, ge=1, le=100)
+):
+    """Get paginated products from all retailers"""
+    try:
+        # Calculate pagination
+        start = (page - 1) * per_page
+        end = start + per_page - 1
+
+        # Get paginated product references
+        refs_response = supabase.table("product_references")\
+            .select("*", count="exact")\
+            .order('created_at', desc=True)\
+            .range(start, end)\
+            .execute()
+
+        if not refs_response.data:
+            return ProductResponse(
+                status="success",
+                data={
+                    "products": [],
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total_pages": 0,
+                        "total_count": 0,
+                        "has_more": False
+                    }
+                }
+            )
+
+        total_count = refs_response.count
+
+        # Fetch products and combine with reference data
+        all_products = []
+        for ref in refs_response.data:
+            try:
+                # Get product from appropriate retailer table
+                product_response = supabase.table(ref['retailer_table'])\
+                    .select("*")\
+                    .eq("id", ref['product_id'])\
+                    .single()\
+                    .execute()
+
+                if product_response.data:
+                    retailer = ref['retailer_table'].replace('_products', '')
+                    product_data = {
+                        **product_response.data,
+                        'retailer': retailer,
+                        'reference_id': ref['id'],
+                    }
+                    all_products.append(product_data)
+            except Exception as e:
+                print(f"Error fetching product {ref['product_id']}: {str(e)}")
+                continue
+
+        # Calculate pagination info
+        total_pages = (total_count + per_page - 1) // per_page
+        has_more = page < total_pages
+
+        return ProductResponse(
+            status="success",
+            data={
+                "products": all_products,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": total_pages,
+                    "total_count": total_count,
+                    "has_more": has_more
+                }
+            }
+        )
+
+    except Exception as e:
+        print(f"Error in get_all_products: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/products/categories")
+async def get_product_categories():
+    """Get all unique product categories across retailers"""
+    try:
+        # Get categories from both tables
+        categories = set()
+        
+        # Get HM categories
+        hm_response = supabase.table("hm_products").select("category").execute()
+        if hm_response.data:
+            categories.update(item.get("category") for item in hm_response.data if item.get("category"))
+        
+        # Get Amazon categories
+        amazon_response = supabase.table("amazon_products").select("category").execute()
+        if amazon_response.data:
+            categories.update(item.get("category") for item in amazon_response.data if item.get("category"))
+
+        return {
+            "status": "success",
+            "data": sorted(list(categories))
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get categories: {str(e)}")
+
+@app.get("/products/brands")
+async def get_product_brands():
+    """Get all unique brands across retailers"""
+    try:
+        brands = set()
+        
+        # Get HM brands
+        hm_response = supabase.table("hm_products").select("brand").execute()
+        if hm_response.data:
+            brands.update(item.get("brand") for item in hm_response.data if item.get("brand"))
+        
+        # Get Amazon brands
+        amazon_response = supabase.table("amazon_products").select("brand").execute()
+        if amazon_response.data:
+            brands.update(item.get("brand") for item in amazon_response.data if item.get("brand"))
+
+        return {
+            "status": "success",
+            "data": sorted(list(brands))
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get brands: {str(e)}")
+
+@app.get("/products/{product_id}")
+async def get_product_details(product_id: str):
+    """Get detailed information about a specific product"""
+    try:
+        # First get the product reference to determine the retailer
+        ref_response = supabase.table("product_references")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .single()\
+            .execute()
+
+        if not ref_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        retailer_table = ref_response.data["retailer_table"]
+        
+        # Get the product details with the product reference included
+        product_response = supabase.table(retailer_table)\
+            .select("*, product_references!inner(*)")\
+            .eq("id", product_id)\
+            .single()\
+            .execute()
+
+        if not product_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Add retailer information
+        product_data = {
+            **product_response.data,
+            'retailer': 'hm' if retailer_table == 'hm_products' else 'amazon',
+            'product_code': product_response.data.get('sku') if retailer_table == 'hm_products' 
+                          else product_response.data.get('asin')
+        }
+
+        return {
+            "status": "success",
+            "data": product_data
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get product details: {str(e)}")
+
+@app.get("/products/similar/{product_id}")
+async def get_similar_products(product_id: str, limit: int = 5):
+    """Get similar products based on category and price range"""
+    try:
+        # Get the original product details
+        ref_response = supabase.table("product_references")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .single()\
+            .execute()
+
+        if not ref_response.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        retailer_table = ref_response.data["retailer_table"]
+        
+        # Get original product details
+        product = supabase.table(retailer_table)\
+            .select("*")\
+            .eq("id", product_id)\
+            .single()\
+            .execute()
+
+        if not product.data:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        price = float(product.data["price"] or 0)
+        price_range = 0.2  # 20% price range
+        min_price = price * (1 - price_range)
+        max_price = price * (1 + price_range)
+
+        similar_products = []
+        
+        # Get similar products from HM
+        hm_similar = supabase.table("hm_products")\
+            .select("*, product_references!inner(*)")\
+            .eq("category", product.data["category"])\
+            .gte("price", min_price)\
+            .lte("price", max_price)\
+            .neq("id", product_id)\
+            .limit(limit)\
+            .execute()
+
+        if hm_similar.data:
+            similar_products.extend([
+                {**item, 'retailer': 'hm', 'product_code': item.get('sku')}
+                for item in hm_similar.data
+            ])
+
+        # Get similar products from Amazon
+        amazon_similar = supabase.table("amazon_products")\
+            .select("*, product_references!inner(*)")\
+            .eq("category", product.data["category"])\
+            .gte("price", min_price)\
+            .lte("price", max_price)\
+            .neq("id", product_id)\
+            .limit(limit)\
+            .execute()
+
+        if amazon_similar.data:
+            similar_products.extend([
+                {**item, 'retailer': 'amazon', 'product_code': item.get('asin')}
+                for item in amazon_similar.data
+            ])
+
+        # Sort by price similarity and limit results
+        similar_products.sort(key=lambda x: abs(float(x.get("price", 0) or 0) - price))
+        similar_products = similar_products[:limit]
+
+        return {
+            "status": "success",
+            "data": similar_products
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get similar products: {str(e)}")
+# Update route handlers
+@app.get("/view")
+async def get_view_page(request: Request, email: str):
+    try:
+        # Get user data
+        response = supabase.table("wardrobe").select("*").eq("email", email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
+            
+        unique_id = response.data[0]["unique_id"]
+        
+        # Get images data
+        image_response = supabase.table("image_data").select("*").eq("unique_id", unique_id).execute()
+        
+        # Ensure proper template context
+        return templates.TemplateResponse(
+            "view.html",
+            context={
+                "request": request,  # Required by Jinja2
+                "items": image_response.data or [],  # Ensure items is always iterable
+                "profile_image": response.data[0].get("profile_image", ""),  # Default empty string
+                "email": email
+            }
+        )
+    except Exception as e:
+        print(f"Template error: {str(e)}")  # Debug logging
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Block direct template access
+@app.exception_handler(404)
+async def custom_404_handler(request: Request, exc: HTTPException):
+    if request.url.path.endswith((".html", ".htm")):
+        return JSONResponse(
+            status_code=403,
+            content={"message": "Direct template access forbidden"}
+        )
+    return JSONResponse(
+        status_code=404,
+        content={"message": "Resource not found"}
+    )
+@app.get("/login")
+async def read_login(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+# Update root and login endpoints
+@app.get("/")
+async def read_root(request: Request):
+    return templates.TemplateResponse("app.html", {"request": request})
+# Auth Endpoints
+@app.post("/signup", response_model=StandardResponse)
+async def signup(data: SignupRequest):
+    try:
+        # Check if email exists
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if response.data:
+            raise HTTPException(status_code=400, detail="Email already exists")
+        
+        # Validate password
+        is_valid, error_message = validate_password(data.password)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_message)
+        
+        # Check if passwords match
+        if data.password != data.confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+        
+        # Generate hash and unique ID
+        hashed_password = create_hash(data.password)
+        unique_id = str(uuid.uuid4())
+        
+        # Generate verification code
+        verification_code = generate_verification_code()
+        
+        # Store in registration cache
+        registration_cache[verification_code] = {
+            "email": data.email,
+            "password": hashed_password,
+            "unique_id": unique_id,
+            "is_verified": False
+        }
+        
+        # Send verification email
+        if not send_verification_email(data.email, verification_code):
+            raise HTTPException(status_code=500, detail="Failed to send verification email")
+        
+        return StandardResponse(
+            status="pending_verification",
+            message="Please check your email for verification code"
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Signup error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create account")
+def save_to_db(email, hashed_password, unique_id):
+    data = {
+        "unique_id": unique_id,
+        "email": email,
+        "password": hashed_password  # Store the hashed password
+    }
+    response = supabase.table("wardrobe").insert(data).execute()
+    
+    if response.data:
+        print("Data successfully saved to Supabase.")
+        return True
+    else:
+        print("Error inserting data into Supabase:", response)
+        return False
+# Authentication Endpoints Continued
+@app.post("/verify", response_model=StandardResponse)
+async def verify(data: VerificationRequest):
+    # Check if verification code exists in cache
+    if data.verification_code not in registration_cache:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+
+    user_data = registration_cache[data.verification_code]
+    try:
+        # Add a check to ensure email matches
+        if user_data["email"] != data.email:
+            raise HTTPException(status_code=400, detail="Email mismatch")
+
+        # Save to database using the password from cache
+        saved = save_to_db(
+            user_data["email"], 
+            user_data["password"],
+            user_data["unique_id"]
+        )
+        
+        if not saved:
+            raise HTTPException(status_code=500, detail="Failed to save user data")
+
+        # Verify the data was actually saved by querying it
+        verify_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not verify_response.data:
+            raise HTTPException(status_code=500, detail="Data verification failed")
+
+        # Remove from cache only after confirming save
+        del registration_cache[data.verification_code]
+        
+        return StandardResponse(
+            status="success",
+            message="Account verified successfully",
+            data={
+                "email": data.email,
+                "password": data.password  # This will be used for auto-login
+            }
+        )
+    except Exception as e:
+        print(f"Verification error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to verify account")
+@app.post("/login", response_model=StandardResponse)
+async def login(data: AuthBase):
+    try:
+        # Get user record
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
+
+        record = response.data[0]
+        stored_password = record.get("password")  # Get the stored password hash
+
+        # If no password in record
+        if not stored_password:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Convert input password to hash and compare
+        if verify_password(stored_password, data.password):
+            return StandardResponse(
+                status="success",
+                message="Login successful. Redirecting to home."
+            )
+        else:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    except Exception as e:
+        print(f"Login error: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 def clean_expired_codes():
     """Remove expired verification codes from cache"""
     current_time = datetime.now()
@@ -115,245 +738,267 @@ def clean_expired_codes():
     for code in expired_codes:
         del forgot_password_cache[code]
 
-@app.post("/forgot-password")
-async def forgot_password(email: str = Form(...)):
-    """
-    Handle forgot password requests
-    """
-    try:
-        # Check if email exists in database
-        response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-        if not response.data:
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": "No account found with this email address"
-                },
-                status_code=404
-            )
+@app.post("/forgot-password", response_model=StandardResponse)
+async def forgot_password(data: AuthBase):
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+    
+    verification_code = generate_verification_code()
+    forgot_password_cache[verification_code] = {
+        "email": data.email,
+        "expiry": datetime.now() + timedelta(minutes=30)
+    }
+    
+    if not send_verification_email(data.email, verification_code):
+        raise HTTPException(status_code=500, detail="Failed to send verification code")
 
-        # Generate verification code
-        verification_code = generate_verification_code()
+    clean_expired_codes()
+    return StandardResponse(
+        status="success",
+        message="Verification code sent to your email"
+    )
+@app.post("/reset-password", response_model=StandardResponse)
+async def reset_password(data: PasswordResetRequest):
+    try:
+        print(f"Received reset request for email: {data.email}")  # Debug log
+        clean_expired_codes()
         
-        # Store in cache with 30-minute expiry
-        forgot_password_cache[verification_code] = {
-            "email": email,
-            "expiry": datetime.now() + timedelta(minutes=30)
-        }
+        # Verify reset code exists and is valid
+        if data.reset_code not in forgot_password_cache:
+            print(f"Invalid reset code: {data.reset_code}")  # Debug log
+            raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
-        # Send verification email
-        if not send_forgot_password_email(email, verification_code):
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": "Failed to send verification code. Please try again."
-                },
-                status_code=500
-            )
-
-        # Clean up expired codes
-        clean_expired_codes()
-
-        return JSONResponse(
-            content={
-                "status": "success",
-                "message": "Verification code sent to your email"
-            }
-        )
-
-    except Exception as e:
-        print(f"Error in forgot_password: {str(e)}")
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "An error occurred. Please try again."
-            },
-            status_code=500
-        )
-
-@app.get("/contact")
-async def contact():
-    contact_path = os.path.join(FRONTEND_DIR, "contact.html")
-    if not os.path.exists(contact_path):
-        raise HTTPException(status_code=404, detail="Contact page not found")
-    return FileResponse(contact_path, media_type="text/html")
-@app.post("/reset-password")
-async def reset_password(
-    email: str = Form(...),
-    reset_code: str = Form(...),
-    new_password: str = Form(...)
-):
-    """
-    Handle password reset with verification code
-    """
-    try:
-        # Clean expired codes first
-        clean_expired_codes()
-
-        # Verify the code exists and matches
-        if reset_code not in forgot_password_cache:
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": "Invalid or expired verification code"
-                },
-                status_code=400
-            )
-
-        # Get stored data
-        stored_data = forgot_password_cache[reset_code]
-
-        # Verify email matches
-        if stored_data["email"] != email:
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": "Email address doesn't match verification code"
-                },
-                status_code=400
-            )
-
-        # Verify code hasn't expired
+        stored_data = forgot_password_cache[data.reset_code]
+        if stored_data["email"] != data.email:
+            print(f"Email mismatch: {data.email} vs {stored_data['email']}")  # Debug log
+            raise HTTPException(status_code=400, detail="Email mismatch")
+        
         if datetime.now() > stored_data["expiry"]:
-            del forgot_password_cache[reset_code]
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": "Verification code has expired"
-                },
-                status_code=400
-            )
+            del forgot_password_cache[data.reset_code]
+            raise HTTPException(status_code=400, detail="Code expired")
 
         # Validate new password
-        is_valid, error_message = validate_password(new_password)
+        is_valid, error_message = validate_password(data.new_password)
         if not is_valid:
-            return JSONResponse(
-                content={
-                    "status": "error",
-                    "message": error_message
-                },
-                status_code=400
-            )
+            raise HTTPException(status_code=400, detail=error_message)
 
-        # Hash new password
-        hashed_password = bcrypt.hashpw(
-            new_password.encode('utf-8'),
-            bcrypt.gensalt()
-        )
-
+        # Hash the new password using the same hashlib method
+        hashed_password = create_hash(data.new_password)
+        
         # Update password in database
         response = supabase.table("wardrobe").update({
-            "password": hashed_password.decode('utf-8')
-        }).eq("email", email).execute()
+            "password": hashed_password
+        }).eq("email", data.email).execute()
 
         if not response.data:
-            raise Exception("Failed to update password in database")
+            raise HTTPException(status_code=500, detail="Failed to update password")
 
-        # Remove used verification code
-        del forgot_password_cache[reset_code]
-
-        return JSONResponse(content={
-            "status": "success",
-            "message": "Password has been reset successfully"
-        })
-
-    except Exception as e:
-        print(f"Error in reset_password: {str(e)}")
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "An error occurred while resetting password"
-            },
-            status_code=500
+        # Clear the reset code from cache
+        del forgot_password_cache[data.reset_code]
+        
+        return StandardResponse(
+            status="success",
+            message="Password reset successfully"
         )
-def generate_verification_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-def validate_password(password: str) -> tuple[bool, str]:
-    """
-    Validate password against security requirements.
-    Returns (is_valid, error_message)
-    """
-    if len(password) < 8:
-        return False, "Password must be at least 8 characters long"
-    
-    if not re.search(r'[A-Z]', password):
-        return False, "Password must contain at least one uppercase letter"
-        
-    if not re.search(r'[a-z]', password):
-        return False, "Password must contain at least one lowercase letter"
-        
-    if not re.search(r'[0-9]', password):
-        return False, "Password must contain at least one number"
-        
-    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-        return False, "Password must contain at least one special character"
-    
-    return True, ""
-def send_verification_email(email, code):
-    sender_email = "fashay.contact@gmail.com"
-    sender_password = os.environ.get("EMAIL_PASSWORD")
-
-    message = MIMEMultipart()
-    message["From"] = sender_email
-    message["To"] = email
-    message["Subject"] = "Email Verification Code"
-
-    body = f"Your verification code is: {code}"
-    message.attach(MIMEText(body, "plain"))
-
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.send_message(message)
-async def upload_to_storage(file_bytes: bytes, bucket: str, file_path: str) -> str:
-    """
-    Upload file to Supabase storage and return the public URL
-    """
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"Password reset error: {str(e)}")  # Debug log
+        raise HTTPException(status_code=500, detail=str(e))
+@app.middleware("http")
+async def timeout_middleware(request, call_next):
     try:
-        # Upload the file to storage
-        response = supabase.storage.from_(bucket).upload(
-            file_path,
-            file_bytes,
-            {"content-type": "image/jpeg"}  # Adjust content-type as needed
+        # Replace asyncio.timeout with asyncio.wait_for for compatibility with Python <3.11
+        return await asyncio.wait_for(call_next(request), timeout=75)  # Set a timeout of 75 seconds
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timed out")
+    except Exception as e:
+        # Log other exceptions for debugging
+        print(f"Error in timeout_middleware: {e}")
+        raise
+# Chat and Styling Endpoints
+@app.post("/chat", response_model=ChatResponse)
+async def handle_chat(data: ChatRequest):
+    try:
+        print("Step 1: Starting chat request")
+        print("Received data:", data.dict())
+
+        print("Step 2: Verifying credentials")
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        record = response.data[0]
+        stored_hash = record["password"]
+        
+        print("Step 3: Verifying password")
+        if not verify_password(stored_hash, data.password):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+        unique_id = record["unique_id"]
+        
+        print("Step 4: Fetching wardrobe data")
+        image_data = supabase.table("image_data")\
+            .select("token_name, image_caption, image_url")\
+            .eq("unique_id", unique_id)\
+            .execute()
+            
+        wardrobe_data = [
+            {
+                "token_name": record["token_name"],
+                "caption": record["image_caption"],
+                "image_url": record["image_url"]
+            } 
+            for record in image_data.data
+        ]
+        print(f"Found {len(wardrobe_data)} wardrobe items")
+
+        print("Step 5: Generating response")
+        try:
+            
+            start_time = time.time()
+            # Replace asyncio.timeout with asyncio.wait_for
+            result = await async_generate_with_retry(
+                    query=data.input_text,
+                    unique_id=unique_id,
+                    stylist_id=data.stylist.lower(),
+                    image_id=data.token_name,
+                    wardrobe_data=wardrobe_data
+                )
+            print(f"Step X: Duration: {time.time() - start_time} seconds")
+
+            #     timeout=0 # Timeout duration in seconds
+            # )
+        except asyncio.TimeoutError:
+            print("Response generation timed out")
+            raise HTTPException(status_code=504, detail="Response generation timed out")
+        
+        print("Step 6: Parsing response")
+        try:
+            parsed_result = json.loads(result)
+            text = parsed_result.get("text", "No response text found.")
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {str(e)}")
+            print(f"Raw result: {result}")
+            raise HTTPException(status_code=500, detail="Failed to parse response")
+
+        print("Step 7: Processing images")
+        images = []
+        print(parsed_result, "parsed_result")
+        value_items = parsed_result.get("value", [])
+        if value_items and isinstance(value_items, list):
+            product_ids = set()
+            
+            for item in value_items:
+                if isinstance(item, dict) and "product_id" in item:
+                    product_ids.add(item["product_id"])
+                elif isinstance(item, str):
+                    product_ids.add(item)
+            
+            for product_id in product_ids:
+                matching_item = next(
+                    (item for item in wardrobe_data if item["token_name"] == product_id),
+                    None
+                )
+                if matching_item:
+                    images.append(WardrobeImage(
+                        image_id=product_id,
+                        image_url=matching_item["image_url"],
+                        token_name=matching_item["token_name"]
+                    ))
+        print(f"Processed {len(images)} images")
+
+        print("Step 8: Processing recommendations")
+        recommendations = None
+        if "recommendations" in parsed_result:
+            recs = parsed_result["recommendations"]
+            products = []
+            
+            for product in recs.get("products", []):
+                try:
+                    if isinstance(product.get("product_text"), dict):
+                        product_text = " ".join(str(v) for v in product["product_text"].values() if v)
+                    else:
+                        product_text = str(product.get("product_text", ""))
+
+                    price = str(product.get("price", ""))
+                    if isinstance(price, (int, float)):
+                        price = str(price)
+
+                    products.append(ProductRecommendation(
+                        category=product.get("category", ""),
+                        product_id=product.get("product_id", ""),
+                        product_text=product_text,
+                        price=price,
+                        brand=product.get("brand", ""),
+                        retailer=product.get("retailer", ""),
+                        similarity_score=float(product.get("similarity_score", 0.0)),
+                        image_urls=product.get("image_urls", []),
+                        url=product.get("url", ""),
+                        suggestion=recs.get("category_suggestions", {}).get(product.get("category", ""), ""),
+                        gender=product.get("gender", ""),
+                        styling_tips=product.get("styling_tips", [])
+                    ))
+                except Exception as e:
+                    print(f"Error processing product: {str(e)}")
+                    continue
+
+            if products:
+                recommendations = Recommendations(
+                    category_suggestions=recs.get("category_suggestions", {}),
+                    products=products
+                )
+        
+        print("Step 9: Preparing final response")
+        shopping_analysis = parsed_result.get("shopping_analysis")
+
+        return ChatResponse(
+            reply=text,
+            images=images,
+            recommendations=recommendations,
+            shopping_analysis=shopping_analysis
         )
-        
-        # Get the public URL
-        public_url = supabase.storage.from_(bucket).get_public_url(file_path)
-        return public_url
     
     except Exception as e:
-        print(f"Error uploading to storage: {str(e)}")
-        raise
+        print(f"Error in handle_chat: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
+# @traceable
+class ImageUploadRequest(BaseModel):
+    email: str
+    password: str
+    token_name: str
+    image: str  # base64 encoded image
 
-async def delete_from_storage(bucket: str, file_path: str):
-    """
-    Delete file from Supabase storage
-    """
-    try:
-        response = supabase.storage.from_(bucket).remove([file_path])
-        return response
-    except Exception as e:
-        print(f"Error deleting from storage: {str(e)}")
-        raise
-def save_to_db(email, hashed_password, unique_id):
-    data = {
-        "unique_id": unique_id,
-        "email": email,
-        "password": hashed_password.decode('utf-8')
-    }
-    response = supabase.table("wardrobe").insert(data).execute()
+    @validator('image')
+    def validate_base64(cls, v):
+        # Remove any potential data URI prefix
+        if ';base64,' in v:
+            v = v.split(';base64,')[1]
+        # Check if the remaining string is valid base64
+        try:
+            base64.b64decode(v)
+            return v
+        except Exception:
+            raise ValueError('Invalid base64 string')
+# File Upload Endpoints
+class ImageUploadResponse(BaseModel):
+    token_name: str
+    status: str
+    caption: str
+    image_url: str
+    unique_id: str
     
-    if response.data:
-        print("Data successfully saved to Supabase.")
-    else:
-        print("Error inserting data into Supabase:", response.json())
-
 def encode_image(image_path):
     input_image = Image.open(image_path).convert('RGB')
     buffered = BytesIO()
     input_image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
-
 @traceable
 def get_apparel_features(image_path):
     base64_image = encode_image(image_path)
@@ -378,140 +1023,6 @@ def get_apparel_features(image_path):
     )
 
     return response.choices[0].message.content, base64_image
-
-
-
-# Get the absolute path to the frontend directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FRONTEND_DIR = os.path.join(BASE_DIR, 'frontend')
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")
-print(FRONTEND_DIR, "FRONTEND_DIR")
-templates = Jinja2Templates(directory=FRONTEND_DIR)
-
-@app.get("/login")
-def read_login():
-    login_path = os.path.join(FRONTEND_DIR, "login.html")
-    if not os.path.exists(login_path):
-        raise HTTPException(status_code=404, detail="Login page not found")
-    return FileResponse(login_path, media_type="text/html")
-
-@app.get("/")
-def read_root():
-    login_path = os.path.join(FRONTEND_DIR, "app.html")
-    if not os.path.exists(login_path):
-        raise HTTPException(status_code=404, detail="App page not found")
-    return FileResponse(login_path, media_type="text/html")
-
-
-@app.post("/signup")
-async def signup(email: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
-    # print("Signup attempt with email:", email)
-
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    if response.data:
-        return JSONResponse(
-            content={"status": "error", "message": "Email already exists. Please sign in."}, 
-            status_code=400
-        )
-
-    # Validate password
-    is_valid, error_message = validate_password(password)
-    if not is_valid:
-        return JSONResponse(
-            content={"status": "error", "message": error_message},
-            status_code=400
-        )
-    if password != confirm_password:
-        return JSONResponse(
-            content={"status": "error", "message": "Passwords do not match"}, 
-            status_code=400
-        )
-    
-    # Validate email format
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-        return JSONResponse(
-            content={"status": "error", "message": "Invalid email format"},
-            status_code=400
-        )
-    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-    unique_id = str(uuid.uuid4())
-    verification_code = generate_verification_code()
-
-    registration_cache[verification_code] = {
-        "email": email,
-        "hashed_password": hashed_password,
-        "unique_id": unique_id,
-        "is_verified": False  # Add verification status
-    }
-
-    send_verification_email(email, verification_code)
-
-    return JSONResponse(
-        content={
-            "status": "pending_verification",  # Changed status to be more specific
-            "message": "Please check your email for verification code"
-        }
-    )
-
-@app.post("/verify")
-async def verify(email: str = Form(...), password: str = Form(...), verification_code: str = Form(...)):
-    if verification_code not in registration_cache:
-        return JSONResponse(
-            content={"status": "error", "message": "Invalid verification code"}, 
-            status_code=400
-        )
-
-    user_data = registration_cache[verification_code]
-    try:
-        save_to_db(
-            user_data["email"], 
-            user_data["hashed_password"], 
-            user_data["unique_id"]
-        )
-        del registration_cache[verification_code]
-        return JSONResponse(
-            content={
-                "status": "success",
-                "message": "Account verified successfully.",
-                "email": email,
-                "password": password  # Send back the plain password for localStorage
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            content={"status": "error", "message": f"Failed to register user: {str(e)}"}, 
-            status_code=500
-        )
-
-
-@app.post("/login")
-async def login(email: str = Form(...), password: str = Form(...)):
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    record = response.data
-
-    if record:
-        hashed_password = record[0]["password"]
-        if isinstance(hashed_password, str):
-            hashed_password = hashed_password.encode('utf-8')
-
-        if bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-            return JSONResponse(content={"status": "success", "message": "Login successful. Redirecting to home."})
-        else:
-            return JSONResponse(content={"status": "error", "message": "Invalid password"}, status_code=401)
-    else:
-        return JSONResponse(content={"status": "error", "message": "Email not found"}, status_code=404)
-
-
-
 def save_image_data(unique_id: str, token_name: str, image_caption: str, image_url: str):
     data = {
         "unique_id": unique_id,
@@ -523,604 +1034,481 @@ def save_image_data(unique_id: str, token_name: str, image_caption: str, image_u
     response = supabase.table("image_data").insert(data).execute()
     if not response.data:
         raise HTTPException(status_code=500, detail="Failed to save image data")
-
-import time
-@app.post("/upload")
+@app.post("/upload", response_model=ImageUploadResponse)
 @traceable
-async def upload_image(
-    email: str = Form(...),
-    password: str = Form(...),
-    token_name: str = Form(...),
-    image: UploadFile = Form(...)
-):
-    temp_input_path = None
-    temp_output_path = None
-    storage_path = None
-    def resize_image_with_padding(image_path, target_size=(300, 300)):
-        """Resize image maintaining aspect ratio and add white padding"""
-        img = Image.open(image_path)
-        
-        # Convert to RGB if needed
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-            
-        # Calculate scaling factor to fit within target size
-        width_ratio = target_size[0] / img.width
-        height_ratio = target_size[1] / img.height
-        resize_ratio = min(width_ratio, height_ratio)
-        
-        # Calculate new size maintaining aspect ratio
-        new_size = (
-            int(img.width * resize_ratio),
-            int(img.height * resize_ratio)
-        )
-        
-        # Resize image with LANCZOS resampling
-        resized_img = img.resize(new_size, Image.LANCZOS)
-        
-        # Create white background image
-        background = Image.new('RGB', target_size, (255, 255, 255))
-        
-        # Calculate position to paste resized image (center)
-        paste_pos = (
-            (target_size[0] - new_size[0]) // 2,
-            (target_size[1] - new_size[1]) // 2
-        )
-        
-        # Paste resized image onto white background
-        background.paste(resized_img, paste_pos)
-        
-        return background
+async def upload_image(data: ImageUploadRequest):
+    # Verify credentials
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+    
+    record = response.data[0]
+    unique_id = record["unique_id"]
+    
     try:
-        # Verify user credentials
-        auth_response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-        record = auth_response.data
-
-        if not record:
+        print(f"Received upload request for token: {data.token_name}")
+        # Decode base64 image
+        image_content = base64.b64decode(data.image)
+        timestamp = str(int(time.time()))
+        storage_path = f"{unique_id}/{timestamp}_{data.token_name}.png"
+        
+        # Upload to storage
+        storage_result = supabase_admin.storage\
+            .from_("wardrobe")\
+            .upload(storage_path, image_content, {"content-type": "image/png"})
+            
+        if not storage_result:
+            raise HTTPException(status_code=500, detail="Failed to upload image")
+            
+        # Get public URL
+        file_url = supabase_admin.storage\
+            .from_("wardrobe")\
+            .get_public_url(storage_path)
+            
+        # Create a temporary file for the image content
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_file:
+            temp_file.write(image_content)
+            temp_file_path = temp_file.name
+            
+        try:
+            # Get image caption
+            image_caption, _ = get_apparel_features(temp_file_path)
+            
+            # Save image data
+            save_image_data(unique_id, data.token_name, image_caption, file_url)
+            
+            return ImageUploadResponse(
+                status="success",
+                token_name=data.token_name,
+                caption=image_caption,
+                image_url=file_url,
+                unique_id=unique_id
+            )
+        finally:
+            # Clean up temporary file
+            os.unlink(temp_file_path)
+        
+    except ValueError as ve:
+        print(f"Validation error: {str(ve)}")
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        if 'storage_path' in locals():
+            try:
+                supabase_admin.storage.from_("wardrobe").remove([storage_path])
+            except:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+    
+# Profile and Style Management Endpoints
+@app.post("/user_profile", response_model=ProfileResponse)
+async def create_or_update_profile(data: UserProfileData):
+    try:
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
             raise HTTPException(status_code=404, detail="Email not found")
-
-        hashed_password = record[0]["password"]
-        if isinstance(hashed_password, str):
-            hashed_password = hashed_password.encode('utf-8')
-
-        if not bcrypt.checkpw(password.encode('utf-8'), hashed_password):
+        
+        record = response.data[0]
+        stored_hash = record["password"]
+        
+        if not bcrypt.verify(data.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid password")
 
-        unique_id = record[0]["unique_id"]
-
-        # Read image content and save temporarily
-        image_content = await image.read()
-
-        os.makedirs("upload", exist_ok=True)
-        temp_input_path = os.path.join("upload", f"temp_input_{int(time.time())}{os.path.splitext(image.filename)[1]}")
+        unique_id = record["unique_id"]
         
-        with open(temp_input_path, "wb") as buffer:
-            buffer.write(image_content)
+        # Prepare profile data
+        profile_data = {
+            "unique_id": unique_id,
+            "favorite_styles": data.favorite_styles,
+            "favorite_colors": data.favorite_colors,
+            "size_preferences": data.size_preferences,
+            "budget_range": data.budget_range,
+            "favorite_materials": data.favorite_materials,
+            "body_shape_info": data.body_shape_info,
+            "style_determined_1": data.style_determined_1,
+            "style_determined_2": data.style_determined_2,
+            "style_determined_3": data.style_determined_3,
+            "style_determined_4": data.style_determined_4,
+            "style_determined_5": data.style_determined_5,
+            "last_updated": datetime.now().isoformat()
+        }
 
-        # Resize image
-        resized_image = resize_image_with_padding(temp_input_path)
-        resized_temp_path = os.path.join("upload", f"resized_{int(time.time())}.png")
-        resized_image.save(resized_temp_path, format="PNG")
-
-        # Replace original temp file with resized version
-        os.remove(temp_input_path)
-        temp_input_path = resized_temp_path
-        # Generate masked image
-        # base64_image = encode_image(temp_input_path)
-        # classification_response = openai_client.chat.completions.create(
-        #     model="gpt-4o-mini",
-        #     messages=[
-        #         {
-        #             "role": "user",
-        #             "content": [
-        #                 {"type": "text", "text": "Classify the given image into fashion apparel and accessories. Fashion apparel means a piece of \
-        #                  clothing like jeans, jacket, hoodie etc that is worn by a person and accessories means any accessory like sneakers, jewelry, \
-        #                  sunglasses etc. that is worn by a person. Only return one word (apparel) or (accessory)"},
-        #             {
-        #                 "type": "image_url",
-        #                 "image_url": {
-        #                     "url": f"data:image/jpeg;base64,{base64_image}"
-        #                 }
-        #             },
-        #             ],
-        #         }
-        #     ],
-        #     max_tokens=300,
-        # )
+        # Update or create profile
+        existing_profile = supabase.table("user_profile").select("*").eq("unique_id", unique_id).execute()
         
-        # if "apparel" in str(classification_response.choices[0].message.content):
-        #     masked_image = generate_mask(temp_input_path)
-        # else:
-        masked_image = Image.open(temp_input_path).convert('RGB')
-        
-        # Save masked image
-        temp_output_path = os.path.join("upload", f"temp_output_{int(time.time())}.png")
-        masked_image.save(temp_output_path, format="PNG")
-
-        # Read masked image for upload
-        with open(temp_output_path, "rb") as masked_file:
-            masked_content = masked_file.read()
-
-        # Generate storage path
-        timestamp = str(int(time.time()))
-        storage_path = f"{unique_id}/{timestamp}_{token_name}.png"
-
-        # Upload masked image to Supabase Storage
-        try:
-            storage_result = supabase_admin.storage \
-                .from_("wardrobe") \
-                .upload(
-                    storage_path,  # path parameter
-                    masked_content,  # file parameter
-                    {"content-type": "image/png"}  # file_options parameter
-                )
-            
-            if not storage_result:
-                raise Exception("Storage upload failed")
-                
-        except Exception as storage_error:
-            print(f"Storage upload error: {str(storage_error)}")
-            raise Exception(f"Failed to upload to storage: {str(storage_error)}")
-
-        # Get public URL
-        try:
-            file_url = supabase_admin.storage \
-                .from_("wardrobe") \
-                .get_public_url(storage_path)
-        except Exception as url_error:
-            print(f"Error getting public URL: {str(url_error)}")
-            # Try to clean up the uploaded file
-            try:
-                supabase_admin.storage.from_("wardrobe").remove([storage_path])
-            except:
-                pass
-            raise Exception(f"Failed to get public URL: {str(url_error)}")
-
-        # Get image caption
-        try:
-            image_caption, _ = get_apparel_features(temp_output_path)
-        except Exception as caption_error:
-            print(f"Error getting image caption: {str(caption_error)}")
-            # Try to clean up the uploaded file
-            try:
-                supabase_admin.storage.from_("wardrobe").remove([storage_path])
-            except:
-                pass
-            raise Exception(f"Failed to get image caption: {str(caption_error)}")
-
-        # Save image data
-        try:
-            save_image_data(unique_id, token_name, image_caption, file_url)
-        except Exception as db_error:
-            print(f"Error saving to database: {str(db_error)}")
-            # Try to clean up the uploaded file
-            try:
-                supabase_admin.storage.from_("wardrobe").remove([storage_path])
-            except:
-                pass
-            raise Exception(f"Failed to save image data: {str(db_error)}")
-
-        return JSONResponse(content={
-            'status': 'success',
-            'caption': image_caption,
-            'image_url': file_url,
-            'unique_id': unique_id
-        })
-
-    except Exception as e:
-        print(f"Upload error: {str(e)}")
-        # Clean up storage if upload succeeded but later steps failed
-        if storage_path:
-            try:
-                supabase_admin.storage.from_("wardrobe").remove([storage_path])
-            except Exception as delete_error:
-                print(f"Error cleaning up storage: {str(delete_error)}")
-        
-        return JSONResponse(
-            status_code=500,
-            content={
-                'status': 'error',
-                'message': f'Failed to process image: {str(e)}',
-                'error_type': 'processing_error'
-            }
-        )
-
-    finally:
-        # Clean up temporary files
-        if temp_input_path and os.path.exists(temp_input_path):
-            try:
-                os.remove(temp_input_path)
-            except Exception as e:
-                print(f"Error removing temp input file: {str(e)}")
-        
-        if temp_output_path and os.path.exists(temp_output_path):
-            try:
-                os.remove(temp_output_path)
-            except Exception as e:
-                print(f"Error removing temp output file: {str(e)}")
-@app.post("/view")
-async def view_images(email: str = Form(...), password: str = Form(...), request: Request = None):
-    # Verify user credentials
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    records = response.data
-
-    if not records:
-        raise HTTPException(status_code=404, detail="Email not found")
-
-    hashed_password = records[0]["password"]
-    if isinstance(hashed_password, str):
-        hashed_password = hashed_password.encode('utf-8')
-
-    if bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-        unique_id = records[0]["unique_id"]
-        
-        # Fetch images from image_data table
-        image_response = supabase.table("image_data").select("*").eq("unique_id", unique_id).execute()
-        images = image_response.data
-        
-        # Use image_url instead of image_base64
-        items = [
-            {
-                "token_name": row["token_name"],
-                "image_caption": row["image_caption"],
-                "image_url": row["image_url"],  # Changed from image_base64 to image_url
-                "unique_id": row["unique_id"]
-            } 
-            for row in images
-        ]
-        
-        # Get profile image
-        profile_image_record = supabase.table("wardrobe").select("profile_image").eq("email", email).execute().data
-        profile_image = profile_image_record[0]["profile_image"] if profile_image_record else None
-        
-        return templates.TemplateResponse(
-            "view.html", 
-            {
-                "request": request, 
-                "items": items, 
-                "profile_image": profile_image
-            }
-        )
-    else:
-        raise HTTPException(status_code=401, detail="Invalid password")
-
-@app.post("/refresh_stylist")
-@traceable
-async def refresh_stylist(
-    email: str = Form(...),
-    password: str = Form(...),
-    stylist: str = Form(...)
-):
-    # Verify user credentials
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    records = response.data
-    
-    if not records:
-        return JSONResponse(content={"error": "Email not found"}, status_code=404)
-    
-    hashed_password = records[0]["password"]
-    if isinstance(hashed_password, str):
-        hashed_password = hashed_password.encode('utf-8')
-    
-    if not bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-        return JSONResponse(content={"error": "Invalid password"}, status_code=401)
-        
-    try:
-        # Fetch user unique ID based on email
-        user_unique_id_response = supabase.table("wardrobe").select("unique_id").eq("email", email).execute()
-        # print("user", user_unique_id_response)
-        user_data = user_unique_id_response.data
-        # Get the unique_id
-        unique_id = user_data[0]["unique_id"]
-        # Reset the conversation for the specific stylist
-        print("stylist", stylist, "UNIQUE_ID", unique_id)
-        fashion_assistant.reset_conversation(unique_id, stylist.lower())
-        
-        try:
-            # parsed_result = json.loads(result)
-            text = "Hello! I'm your refreshed stylist. How can I help you today?"
-            
-            return JSONResponse(content={
-                "status": "success",
-                "message": "Stylist refreshed successfully",
-                "initial_message": text
-            })
-            
-        except json.JSONDecodeError:
-            return JSONResponse(
-                content={
-                    "status": "success",
-                    "message": "Stylist refreshed successfully",
-                    "initial_message": "Hello! I'm your refreshed stylist. How can I help you today?"
-                }
-            )
-            
-    except Exception as e:
-        print(f"Error in refresh_stylist: {str(e)}")
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": f"Failed to refresh stylist: {str(e)}"
-            },
-            status_code=500
-        )
-@app.post("/chat")
-@traceable
-async def handle_chat(
-    input_text: str = Form(...), 
-    token_name: str = Form(...), 
-    email: str = Form(...), 
-    password: str = Form(...),
-    stylist: str = Form(...)  # Add stylist parameter
-):
-    print(f"Debug chat: Received request with stylist: {stylist}")
-    print(f"Debug chat: input_text={input_text}, token_name={token_name}, email={email}, password={'*' * len(password)}")
-    # print(f"Debug chat: input_text={input_text}, unique_id={unique_id}, token_name={token_name}, email={email}, password={'*' * len(password)}")
-
-    # Verify user credentials
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    print(response)
-    records = response.data
-    if not records:
-        return JSONResponse(content={"error": "Email not found"}, status_code=404)
-    
-    hashed_password = records[0]["password"]
-    if isinstance(hashed_password, str):
-        hashed_password = hashed_password.encode('utf-8')
-    
-    if not bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-        return JSONResponse(content={"error": "Invalid password"}, status_code=401)
-
-    # Fetch user unique ID based on email
-    user_unique_id_response = supabase.table("wardrobe").select("unique_id").eq("email", email).execute()
-    print("user", user_unique_id_response)
-
-    # Access the data attribute to get the unique_id
-    user_data = user_unique_id_response.data
-    if not user_data:
-        raise ValueError("No unique_id found for the given email.")
-
-    # Get the unique_id
-    unique_id = user_data[0]["unique_id"]
-
-    # Fetch image data based on the unique_id
-    image_data_response = supabase.table("image_data").select("token_name", "image_caption").eq("unique_id", unique_id).execute()
-    image_data = image_data_response.data
-    wardrobe_data = [{"token_name": record["token_name"], "caption": record["image_caption"]} for record in image_data]
-    
-    try:
-        # Pass token_name and unique_id as "general_chat" if applicable
-        if token_name == "general_chat" and unique_id == "general_chat":
-            result = fashion_assistant.generate_response(
-                query=input_text,
-                unique_id="general_chat",
-                stylist_id=stylist.lower(),
-                image_id="general_chat",
-                wardrobe_data=wardrobe_data
-            )
+        if existing_profile.data:
+            response = supabase.table("user_profile")\
+                .update(profile_data)\
+                .eq("unique_id", unique_id)\
+                .execute()
         else:
-            result = fashion_assistant.generate_response(
-                query=input_text,
-                unique_id=unique_id,
-                stylist_id=stylist.lower(),
-                image_id=token_name,
-                wardrobe_data=wardrobe_data
-            )
-        
-        try:
-            parsed_result = json.loads(result)
-            print(parsed_result, "Debug pasrsed result")
-            text = parsed_result.get("text", "No response text found.")
-            image_ids = parsed_result.get("value", [])
-
-            images = []
-            for image_id in image_ids:
-                image_response = supabase.table("image_data").select("image_url").eq("token_name", image_id).execute()
-                print(image_response.data[0]["image_url"], "url", image_id, "image id")
-                if image_response.data:
-                    images.append({
-                        "image_id": image_id, 
-                        "image_url": image_response.data[0]["image_url"]
-                    })
-            print(images, "images")
-            return JSONResponse(content={"reply": text, "images": images})
-            
-        except json.JSONDecodeError:
-            return JSONResponse(
-                content={
-                    "error": "Failed to parse JSON from response", 
-                    "result": result
-                }, 
-                status_code=500
-            )
-            
-    except Exception as e:
-        print(f"Error in generate_response: {str(e)}")
-        return JSONResponse(
-            content={
-                "error": f"Failed to generate response: {str(e)}", 
-                "result": None
-            }, 
-            status_code=500
-        )
-
-
-@app.post("/delete_item/{token_name}")
-async def delete_item(token_name: str, email: str = Form(...), password: str = Form(...)):
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    record = response.data
-
-    if not record:
-        raise HTTPException(status_code=404, detail="Email not found")
-    
-    unique_id = record[0]["unique_id"]
-    hashed_password = record[0]["password"]
-    if isinstance(hashed_password, str):
-        hashed_password = hashed_password.encode('utf-8')
-
-    if bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-        try:
-            # Get the image data first
-            image_data = supabase.table("image_data")\
-                .select("*")\
-                .eq("token_name", token_name)\
+            profile_data["created_at"] = datetime.now().isoformat()
+            response = supabase.table("user_profile")\
+                .insert(profile_data)\
                 .execute()
 
-            if image_data.data:
-                # Delete from storage first
-                storage_path = f"{unique_id}/{token_name}"
-                supabase_admin.storage \
-                    .from_("wardrobe") \
-                    .remove([storage_path])
-                
-                # Then delete from database
-                delete_response = supabase.table("image_data")\
-                    .delete()\
-                    .eq("token_name", token_name)\
-                    .execute()
-                
-                if delete_response.data:
-                    return JSONResponse(content={"success": True, "message": "Item deleted successfully"})
-                
-            return JSONResponse(content={"success": False, "message": "Item not found"}, status_code=404)
-            
-        except Exception as e:
-            return JSONResponse(
-                status_code=500, 
-                content={"success": False, "message": f"Failed to delete item: {str(e)}"}
-            )
-    else:
-        raise HTTPException(status_code=401, detail="Invalid password")
+        return ProfileResponse(
+            status="success",
+            message="Profile updated successfully",
+            data=response.data[0]
+        )
 
-@app.post("/update_gender")
-async def update_gender(
-    email: str = Form(...),
-    password: str = Form(...),
-    gender: str = Form(...)  # Gender identity field
-):
-    # Check if user exists and verify password
-    response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-    record = response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
 
-    if not record:
+@app.get("/user_profile/{unique_id}", response_model=ProfileResponse)
+async def get_user_profile(unique_id: str, data: AuthBase):
+    try:
+        # Verify credentials
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        # Get profile data
+        profile_response = supabase.table("user_profile").select("*").eq("unique_id", unique_id).execute()
+        if not profile_response.data:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        return ProfileResponse(
+            status="success",
+            data=profile_response.data[0]
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch profile: {str(e)}")
+
+# View and Delete Endpoints
+class ViewImagesResponse(BaseModel):
+    items: List[Dict[str, str]]
+    profile_image: Optional[str]
+
+@app.post("/view", response_model=ViewImagesResponse)
+async def view_images(data: AuthBase = None):
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
         raise HTTPException(status_code=404, detail="Email not found")
+    
+    record = response.data[0]
+    unique_id = record["unique_id"]
+    
+    # Fetch images
+    image_response = supabase.table("image_data").select("*").eq("unique_id", unique_id).execute()
+    
+    items = [
+        {
+            "token_name": row["token_name"],
+            "image_caption": row["image_caption"],
+            "image_url": row["image_url"],
+            "unique_id": row["unique_id"]
+        } 
+        for row in image_response.data
+    ]
+    
+    # Get profile image
+    profile_image_record = supabase.table("wardrobe").select("profile_image").eq("email", data.email).execute()
+    profile_image = profile_image_record.data[0]["profile_image"] if profile_image_record.data else None
 
-    hashed_password = record[0]["password"]
-    if isinstance(hashed_password, str):
-        hashed_password = hashed_password.encode('utf-8')
+    return ViewImagesResponse(items=items, profile_image=profile_image)
 
-    if not bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid password")
+class DeleteItemResponse(BaseModel):
+    success: bool
+    message: str
 
-    # Update gender identity in the wardrobe table
-    update_response = supabase.table("wardrobe").update({"gender": gender}).eq("email", email).execute()
-    if update_response.data:
-        return JSONResponse(content={'success': True, 'message': 'Gender identity updated successfully'})
-    else:
-        return JSONResponse(content={'success': False, 'message': 'Failed to update gender identity'}, status_code=500)
+async def delete_from_storage(bucket: str, file_path: str):
+    """
+    Delete file from Supabase storage
+    """
+    try:
+        response = supabase.storage.from_(bucket).remove([file_path])
+        return response
+    except Exception as e:
+        print(f"Error deleting from storage: {str(e)}")
+        raise
+@app.delete("/delete_item/{token_name}", response_model=DeleteItemResponse)
+async def delete_item(token_name: str, data: AuthBase):
+    # Verify credentials
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+    
+    record = response.data[0]
+    unique_id = record["unique_id"]
+    
+    try:
+        # Get image data
+        image_data = supabase.table("image_data").select("*").eq("token_name", token_name).execute()
+        if not image_data.data:
+            raise HTTPException(status_code=404, detail="Item not found")
+
+        # Delete from storage
+        storage_path = f"{unique_id}/{token_name}"
+        await delete_from_storage("wardrobe", storage_path)
+        
+        # Delete from database
+        delete_response = supabase.table("image_data").delete().eq("token_name", token_name).execute()
+        
+        return DeleteItemResponse(
+            success=True,
+            message="Item deleted successfully"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete item: {str(e)}")
+
+# Gender Management Endpoints
+@app.post("/update_gender", response_model=StandardResponse)
+async def update_gender(data: GenderUpdateRequest):
+    # Verify credentials
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+    
+    try:
+        update_response = supabase.table("wardrobe")\
+            .update({"gender": data.gender})\
+            .eq("email", data.email)\
+            .execute()
+            
+        return StandardResponse(
+            status="success",
+            message="Gender identity updated successfully"
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update gender: {str(e)}")
+
 @app.get("/get_gender")
 async def get_gender(email: str):
     response = supabase.table("wardrobe").select("gender").eq("email", email).execute()
+    gender = "other"
     if response.data and "gender" in response.data[0]:
         gender = response.data[0]["gender"]
-        return JSONResponse(content={"gender": gender})
-    else:
-        return JSONResponse(content={"gender": "other"})  # Default to "other" if gender is missing
+    
+    return {"gender": gender}
 
-
-
-@app.post("/upload_profile_picture")
-async def upload_profile_picture(
-    email: str = Form(...),
-    password: str = Form(...),
-    image: UploadFile = Form(...)
-):
+# Stylist Management Endpoint
+@app.post("/refresh_stylist", response_model=StandardResponse)
+@traceable
+async def refresh_stylist(data: RefreshRequest):
     try:
-        print("Uploading profile picture... debug", email, password, image)
-        # Verify user
-        response = supabase.table("wardrobe").select("*").eq("email", email).execute()
-        record = response.data
-
-        if not record:
+        # Verify credentials
+        response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not response.data:
             raise HTTPException(status_code=404, detail="Email not found")
-
-        hashed_password = record[0]["password"]
-        if isinstance(hashed_password, str):
-            hashed_password = hashed_password.encode('utf-8')
-
-        if not bcrypt.checkpw(password.encode('utf-8'), hashed_password):
-            raise HTTPException(status_code=401, detail="Invalid password")
-
-        # Read image content
-        image_content = await image.read()
         
-        # Create unique filename
-        timestamp = str(int(time.time()))
-        file_extension = os.path.splitext(image.filename)[1].lower()
-        storage_path = f"profile_pictures/{timestamp}_{email}{file_extension}"
-
-        try:
-            # Upload to storage using bytes directly
-            storage_response = supabase_admin.storage \
-                .from_("wardrobe") \
-                .upload(
-                    storage_path,  # Remove 'path=' as it's a positional argument
-                    image_content, # Direct bytes instead of file object
-                    {"content-type": image.content_type}  # Simplified file options
-                )
-
-            if not storage_response:  # Check if upload failed
-                raise Exception("Failed to upload to storage")
-
-            # Get public URL
-            profile_url = supabase_admin.storage \
-                .from_("wardrobe") \
-                .get_public_url(storage_path)
-
-            # Update profile URL in database
-            update_response = supabase.table("wardrobe") \
-                .update({"profile_image": profile_url}) \
-                .eq("email", email) \
-                .execute()
-
-            if not update_response.data:
-                # If database update fails, try to clean up the uploaded file
-                try:
-                    supabase_admin.storage \
-                        .from_("wardrobe") \
-                        .remove([storage_path])
-                except:
-                    pass  # Silently fail cleanup
-                raise Exception("Failed to update database")
-
-            return JSONResponse(
-                content={
-                    "status": "success",
-                    "message": "Profile picture updated successfully",
-                    "url": profile_url
-                }
-            )
-
-        except Exception as storage_error:
-            print(f"Storage error: {str(storage_error)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Storage error: {str(storage_error)}"
-            )
-
-    except HTTPException as http_error:
-        raise http_error
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "message": str(e),
-                "error_type": "processing_error"
-            }
+        record = response.data[0]
+        unique_id = record["unique_id"]
+        
+        # Get and reset the assistant
+        fashion_assistant = get_or_create_assistant(data.stylist.lower())
+        intro_message = fashion_assistant.reset_conversation(unique_id, data.stylist.lower())
+        print(f"Refreshed stylist: {intro_message}")
+        return StandardResponse(
+            status="success",
+            message="Stylist refreshed successfully",
+            data={"initial_message": intro_message}
         )
-# At the bottom of main.py, change the run block to:
+        
+    except Exception as e:
+        print(f"Error in refresh_stylist: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh stylist: {str(e)}")
+
+
+# Profile Picture Management
+class ProfilePictureResponse(BaseModel):
+    status: str
+    message: str
+    url: Optional[str]
+
+@app.post("/upload_profile_picture", response_model=ProfilePictureResponse)
+async def upload_profile_picture(data: ProfilePictureRequest):
+    # Verify credentials
+    response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Email not found")
+    
+    try:
+        # Process image
+        try:
+            image_content = base64.b64decode(data.image_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid base64 image data")
+        timestamp = str(int(time.time()))
+        file_extension = os.path.splitext(data.filename)[1].lower()
+        storage_path = f"profile_pictures/{timestamp}_{data.email}{file_extension}"
+        
+        # Upload to storage
+        storage_response = supabase_admin.storage\
+            .from_("wardrobe")\
+            .upload(storage_path, image_content, {"content-type": data.content_type})
+            
+        if not storage_response:
+            raise HTTPException(status_code=500, detail="Failed to upload to storage")
+            
+        # Get public URL
+        profile_url = supabase_admin.storage\
+            .from_("wardrobe")\
+            .get_public_url(storage_path)
+            
+        # Update database
+        update_response = supabase.table("wardrobe")\
+            .update({"profile_image": profile_url})\
+            .eq("email", data.email)\
+            .execute()
+            
+        return ProfilePictureResponse(
+            status="success",
+            message="Profile picture updated successfully",
+            url=profile_url
+        )
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error in upload_profile_picture: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update profile picture: {str(e)}")
+
+
+@app.post("/style/response", response_model=StandardResponse)
+async def add_style_response(data: StyleResponse):
+    try:
+        # Verify user exists
+        user_response = supabase.table("wardrobe").select("*").eq("unique_id", data.unique_id).execute()
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Prepare the data
+        style_data = {
+            "unique_id": data.unique_id,
+            "stylist_id": data.stylist_id,
+            "user_query": data.user_query,
+            "stylist_response": data.stylist_response,
+            "outfit_image_ids": data.outfit_image_ids or [],
+            "style_category": data.style_category,
+            "is_saved": data.is_saved,
+            "preference": data.preference,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+
+        # Insert into database
+        response = supabase.table("user_style_outfits").insert(style_data).execute()
+
+        return StandardResponse(
+            status="success",
+            message="Style response saved successfully",
+            data={"response_id": response.data[0]["id"]}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save style response: {str(e)}")
+
+@app.post("/style/preference", response_model=StandardResponse)
+async def update_preference(data: OutfitPreference):
+    try:
+        user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        record = user_response.data[0]
+        stored_hash = record["password"]
+        
+        # Replace with
+        if not verify_password(stored_hash, data.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Verify preference value
+        if data.preference not in ["LIKE", "DISLIKE"]:
+            raise HTTPException(status_code=400, detail="Invalid preference value")
+
+        # Update preference
+        response = supabase.table("user_style_outfits")\
+            .update({"preference": data.preference, "updated_at": datetime.now().isoformat()})\
+            .eq("id", data.response_id)\
+            .execute()
+
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Style response not found")
+
+        return StandardResponse(
+            status="success",
+            message=f"Preference updated to {data.preference}",
+            data={"response_id": data.response_id}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update preference: {str(e)}")
+
+@app.post("/style/save-outfit", response_model=StandardResponse)
+async def save_outfit(data: SaveOutfit):
+    try:
+        user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        record = user_response.data[0]
+        stored_hash = record["password"]
+        
+        if not verify_password(stored_hash, data.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Update outfit data
+        update_data = {
+            "outfit_image_ids": data.outfit_image_ids,
+            "style_category": data.style_category,
+            "is_saved": True,
+            "saved_date": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+
+        response = supabase.table("user_style_outfits")\
+            .update(update_data)\
+            .eq("id", data.response_id)\
+            .execute()
+
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Style response not found")
+
+        return StandardResponse(
+            status="success",
+            message="Outfit saved successfully",
+            data={"response_id": data.response_id}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save outfit: {str(e)}")
+
+# Optional: Add a getter endpoint to retrieve saved outfits
+@app.get("/style/saved-outfits/{unique_id}", response_model=StandardResponse)
+async def get_saved_outfits(unique_id: str, data: AuthBase):
+    try:
+        user_response = supabase.table("wardrobe").select("*").eq("email", data.email).execute()
+        if not user_response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        record = user_response.data[0]
+        stored_hash = record["password"]
+        
+        if not verify_password(stored_hash, data.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # Get saved outfits
+        response = supabase.table("user_style_outfits")\
+            .select("*")\
+            .eq("unique_id", unique_id)\
+            .eq("is_saved", True)\
+            .order("saved_date", desc=True)\
+            .execute()
+
+        return StandardResponse(
+            status="success",
+            message="Saved outfits retrieved successfully",
+            data={"outfits": response.data}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve saved outfits: {str(e)}")
+
+# Server startup
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))

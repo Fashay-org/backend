@@ -1,0 +1,16 @@
+services:
+  api:
+    build:
+      context: ..  # Change to parent directory to access both frontend and backend
+      dockerfile: backend/Dockerfile  # Specify path to Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app/backend
+      - ../frontend:/app/frontend
+    env_file:
+      - .env
+    deploy:
+      resources:
+        limits:
+          memory: 2G
